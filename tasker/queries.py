@@ -7,7 +7,7 @@ import sqlite3
 from typing import Dict, List, Optional, Sequence
 
 from .database import get_connection, transaction
-from .models import INVERSE_LABELS, Priority, Project, RelationType, Status, Task, TaskRelation
+from .models import INVERSE_LABELS, CodeReview, Note, Priority, Project, RelationType, Status, Task, TaskRelation
 from .utils import days_ago, now_iso
 
 ORDER_STEP = 1000
@@ -295,8 +295,11 @@ def complete_task(task_id: int) -> Optional[Task]:
 
 
 def review_task(task_id: int) -> Optional[Task]:
-    """Set task status to review."""
-    return update_task(task_id, status=Status.REVIEW)
+    """Set task status to review and auto-create CR-1 stub on first call."""
+    updated = update_task(task_id, status=Status.REVIEW)
+    if updated and not task_has_reviews(task_id):
+        create_review_stub(task_id)
+    return updated
 
 
 def qa_task(task_id: int) -> Optional[Task]:
@@ -510,7 +513,114 @@ def is_blocked(task_id: int) -> bool:
     return row is not None
 
 
-def export_tasks_markdown(project: Project, tasks: List[Task]) -> str:
+# Note operations
+
+
+def add_note(task_id: int, author: str, content: str) -> Note:
+    """Append an immutable note to a task."""
+    with transaction() as conn:
+        cur = conn.execute(
+            "INSERT INTO task_notes(task_id, author, content) VALUES (?, ?, ?)",
+            (task_id, author, content),
+        )
+        row = conn.execute(
+            "SELECT * FROM task_notes WHERE id = ?", (cur.lastrowid,)
+        ).fetchone()
+        return Note.from_row(row)
+
+
+def get_notes(task_id: int) -> List[Note]:
+    """Return all notes for a task, ordered by creation time."""
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT * FROM task_notes WHERE task_id = ? ORDER BY created_at ASC",
+        (task_id,),
+    ).fetchall()
+    return [Note.from_row(r) for r in rows]
+
+
+# Review operations
+
+
+def task_has_reviews(task_id: int) -> bool:
+    """Return True if the task has at least one code review."""
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT 1 FROM task_reviews WHERE task_id = ? LIMIT 1", (task_id,)
+    ).fetchone()
+    return row is not None
+
+
+def create_review_stub(task_id: int) -> CodeReview:
+    """Create a new CR stub with auto-incremented cr_num (within a transaction)."""
+    with transaction() as conn:
+        row = conn.execute(
+            "SELECT COALESCE(MAX(cr_num), 0) + 1 AS next_num FROM task_reviews WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()
+        cr_num = row["next_num"]
+        cur = conn.execute(
+            "INSERT INTO task_reviews(task_id, cr_num) VALUES (?, ?)",
+            (task_id, cr_num),
+        )
+        row = conn.execute(
+            "SELECT * FROM task_reviews WHERE id = ?", (cur.lastrowid,)
+        ).fetchone()
+        return CodeReview.from_row(row)
+
+
+def get_reviews(task_id: int) -> List[CodeReview]:
+    """Return all code reviews for a task ordered by cr_num."""
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT * FROM task_reviews WHERE task_id = ? ORDER BY cr_num ASC",
+        (task_id,),
+    ).fetchall()
+    return [CodeReview.from_row(r) for r in rows]
+
+
+def get_review(task_id: int, cr_num: int) -> Optional[CodeReview]:
+    """Fetch a single code review by task_id and cr_num."""
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT * FROM task_reviews WHERE task_id = ? AND cr_num = ?",
+        (task_id, cr_num),
+    ).fetchone()
+    return CodeReview.from_row(row) if row else None
+
+
+def update_review(task_id: int, cr_num: int, **fields) -> Optional[CodeReview]:
+    """Update one or more fields of a code review. Returns updated CR or None."""
+    allowed = {"reviewer", "recommendations", "devils_advocate", "false_positives"}
+    sets = []
+    params: List = []
+    for key, value in fields.items():
+        if key in allowed and value is not None:
+            sets.append(f"{key} = ?")
+            params.append(value)
+    if not sets:
+        return get_review(task_id, cr_num)
+    sets.append("updated_at = CURRENT_TIMESTAMP")
+    params.extend([task_id, cr_num])
+    with transaction() as conn:
+        conn.execute(
+            f"UPDATE task_reviews SET {', '.join(sets)} WHERE task_id = ? AND cr_num = ?",
+            params,
+        )
+    return get_review(task_id, cr_num)
+
+
+def delete_review(task_id: int, cr_num: int) -> bool:
+    """Delete a code review. Returns True if a row was deleted."""
+    with transaction() as conn:
+        cur = conn.execute(
+            "DELETE FROM task_reviews WHERE task_id = ? AND cr_num = ?",
+            (task_id, cr_num),
+        )
+        return cur.rowcount > 0
+
+
+def export_tasks_markdown(project: Project, tasks: List[Task], include_notes: bool = False) -> str:
     """Render tasks as a Markdown document grouped by status."""
     lines = [f"# Tasks for {project.name}", ""]
     by_status: Dict[Status, List[Task]] = {Status.TODO: [], Status.IN_PROGRESS: [], Status.REVIEW: [], Status.QA: [], Status.BLOCKED: [], Status.DONE: []}
@@ -534,5 +644,25 @@ def export_tasks_markdown(project: Project, tasks: List[Task]) -> str:
             lines.append(
                 f"- [ {'x' if status == Status.DONE else ' '} ] {t.title} {pr}{grp}\n  {t.description or ''}"
             )
+            if include_notes:
+                notes = get_notes(t.id)
+                if notes:
+                    lines.append("  **Notes:**")
+                    for n in notes:
+                        ts = n.created_at.strftime("%Y-%m-%d %H:%M")
+                        lines.append(f"  - [{ts}] {n.author}: {n.content}")
+                reviews = get_reviews(t.id)
+                if reviews:
+                    lines.append("  **Code Reviews:**")
+                    for cr in reviews:
+                        ts = cr.created_at.strftime("%Y-%m-%d %H:%M")
+                        reviewer_str = f" — Reviewer: {cr.reviewer}" if cr.reviewer else ""
+                        lines.append(f"  - CR-{cr.cr_num} ({ts}{reviewer_str})")
+                        if cr.recommendations:
+                            lines.append(f"    - Recommendations: {cr.recommendations}")
+                        if cr.devils_advocate:
+                            lines.append(f"    - Devil's Advocate: {cr.devils_advocate}")
+                        if cr.false_positives:
+                            lines.append(f"    - False Positives: {cr.false_positives}")
         lines.append("")
     return "\n".join(lines)

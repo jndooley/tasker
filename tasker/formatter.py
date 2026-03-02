@@ -6,7 +6,7 @@ from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
-from .models import Priority, Project, Status, Task
+from .models import CodeReview, Note, Priority, Project, Status, Task
 from .utils import format_ts
 
 console = Console()
@@ -176,6 +176,49 @@ def print_groups(groups: list):
     for g in groups:
         table.add_row(g["group_id"], str(g["task_count"]))
     console.print(table)
+
+
+def format_notes(notes: List[Note]) -> None:
+    """Render notes log section."""
+    console.print("[bold]Notes[/bold]")
+    console.print("─" * 41)
+    if not notes:
+        console.print("[dim](no notes)[/dim]")
+        return
+    for note in notes:
+        ts = note.created_at.strftime("%Y-%m-%d %H:%M")
+        console.print(f"[dim][{ts}][/dim]  {note.author}")
+        console.print(note.content)
+        console.print()
+
+
+def format_reviews(reviews: List[CodeReview]) -> None:
+    """Render code reviews section."""
+    console.print("[bold]Code Reviews[/bold]")
+    console.print("─" * 41)
+    if not reviews:
+        console.print("[dim](no reviews)[/dim]")
+        return
+    for cr in reviews:
+        ts = cr.created_at.strftime("%Y-%m-%d %H:%M")
+        reviewer_str = f"  Reviewer: {cr.reviewer}" if cr.reviewer else ""
+        console.print(f"[bold]CR-{cr.cr_num}[/bold]  {ts}{reviewer_str}")
+        console.print()
+        if cr.recommendations:
+            console.print("  [underline]Recommendations[/underline]")
+            for line in cr.recommendations.splitlines():
+                console.print(f"  {line}")
+            console.print()
+        if cr.devils_advocate:
+            console.print("  [underline]Devil's Advocate[/underline]")
+            for line in cr.devils_advocate.splitlines():
+                console.print(f"  {line}")
+            console.print()
+        if cr.false_positives:
+            console.print("  [underline]False Positives[/underline]")
+            for line in cr.false_positives.splitlines():
+                console.print(f"  {line}")
+            console.print()
 
 
 def print_stats(stats: dict):

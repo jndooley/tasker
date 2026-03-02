@@ -10,6 +10,8 @@ import click
 from . import __version__
 from .formatter import (
     console,
+    format_notes,
+    format_reviews,
     print_focus,
     print_groups,
     print_projects,
@@ -20,20 +22,26 @@ from .formatter import (
 from .models import RelationType
 from .models import Priority, Status
 from .queries import (
+    add_note,
     add_relation,
     block_task,
     clean_completed,
     complete_task,
     create_project,
+    create_review_stub,
     create_task,
+    delete_review,
     delete_task,
     export_tasks,
     export_tasks_markdown,
     get_active_project,
     get_focus_task,
+    get_notes,
     get_project_by_path,
     get_project_stats,
     get_relations,
+    get_review,
+    get_reviews,
     get_task,
     is_blocked,
     list_groups,
@@ -45,6 +53,7 @@ from .queries import (
     review_task,
     set_active_project,
     start_task,
+    update_review,
     update_task,
 )
 from .utils import resolve_project_path
@@ -265,7 +274,8 @@ def list_cmd(
 
 @cli.command()
 @click.argument("task_id", type=int)
-def show(task_id: int):
+@click.option("--notes", "show_notes", is_flag=True, help="Also show notes and code reviews")
+def show(task_id: int, show_notes: bool):
     """Show task details."""
     project = _require_project()
     task = get_task(task_id)
@@ -274,6 +284,11 @@ def show(task_id: int):
         return
     relations = get_relations(task_id)
     print_task_detail(task, relations=relations)
+    if show_notes:
+        console.print()
+        format_notes(get_notes(task_id))
+        console.print()
+        format_reviews(get_reviews(task_id))
 
 
 @cli.command()
@@ -359,9 +374,13 @@ def review(task_id: int):
     if not task or task.project_id != project.id:
         console.print(f"Task {task_id} not found in active project.")
         return
+    from .queries import task_has_reviews
+    had_reviews = task_has_reviews(task_id)
     updated = review_task(task_id)
     if updated:
         console.print(f"Task #{task_id} in review")
+        if not had_reviews:
+            console.print(f"Created CR-1. Use 'tasker cr update {task_id} 1' to fill in details.")
 
 
 @cli.command()
@@ -507,6 +526,144 @@ def unlink(source_id: int, target_id: int, relation_type: str):
         console.print("No matching relation found.")
 
 
+# Note command
+
+
+@cli.command()
+@click.argument("task_id", type=int)
+@click.argument("content")
+@click.option("--author", "-a", required=True, help="Note author (required)")
+def note(task_id: int, content: str, author: str):
+    """Append a note to a task."""
+    project = _require_project()
+    task = get_task(task_id)
+    if not task or task.project_id != project.id:
+        console.print(f"Task {task_id} not found in active project.")
+        return
+    if not author.strip():
+        raise click.BadParameter("Author cannot be empty.", param_hint="'--author'")
+    n = add_note(task_id, author.strip(), content)
+    console.print(f"Note added to task #{task_id} (id={n.id})")
+
+
+# Code review commands
+
+
+@cli.group()
+def cr():
+    """Manage code reviews for a task."""
+
+
+@cr.command(name="list")
+@click.argument("task_id", type=int)
+def cr_list(task_id: int):
+    """List all code reviews for a task."""
+    project = _require_project()
+    task = get_task(task_id)
+    if not task or task.project_id != project.id:
+        console.print(f"Task {task_id} not found in active project.")
+        return
+    reviews = get_reviews(task_id)
+    if not reviews:
+        console.print("No code reviews found.")
+        return
+    from rich.table import Table
+    table = Table(title=f"Code Reviews — Task #{task_id}")
+    table.add_column("CR#", justify="right")
+    table.add_column("Reviewer")
+    table.add_column("Created")
+    table.add_column("Fields set", justify="right")
+    for cr_obj in reviews:
+        filled = sum(1 for f in [cr_obj.reviewer, cr_obj.recommendations, cr_obj.devils_advocate, cr_obj.false_positives] if f)
+        table.add_row(
+            str(cr_obj.cr_num),
+            cr_obj.reviewer or "-",
+            cr_obj.created_at.strftime("%Y-%m-%d %H:%M"),
+            str(filled),
+        )
+    console.print(table)
+
+
+@cr.command(name="show")
+@click.argument("task_id", type=int)
+@click.argument("cr_num", type=int)
+def cr_show(task_id: int, cr_num: int):
+    """Show full detail of one code review."""
+    project = _require_project()
+    task = get_task(task_id)
+    if not task or task.project_id != project.id:
+        console.print(f"Task {task_id} not found in active project.")
+        return
+    cr_obj = get_review(task_id, cr_num)
+    if not cr_obj:
+        console.print(f"CR-{cr_num} not found for task #{task_id}.")
+        return
+    format_reviews([cr_obj])
+
+
+@cr.command(name="add")
+@click.argument("task_id", type=int)
+def cr_add(task_id: int):
+    """Create a new code review stub for a task."""
+    project = _require_project()
+    task = get_task(task_id)
+    if not task or task.project_id != project.id:
+        console.print(f"Task {task_id} not found in active project.")
+        return
+    cr_obj = create_review_stub(task_id)
+    console.print(f"Created CR-{cr_obj.cr_num} for task #{task_id}.")
+    console.print(f"Use 'tasker cr update {task_id} {cr_obj.cr_num}' to fill in details.")
+
+
+@cr.command(name="update")
+@click.argument("task_id", type=int)
+@click.argument("cr_num", type=int)
+@click.option("--reviewer", "-r", help="Name of reviewer")
+@click.option("--recommendations", "-R", help="Core findings and suggested changes (or - for stdin)")
+@click.option("--devils-advocate", "-d", "devils_advocate", help="Reviewer's self-critique (or - for stdin)")
+@click.option("--false-positives", "-f", "false_positives", help="Issues raised but ruled out (or - for stdin)")
+def cr_update(task_id: int, cr_num: int, reviewer: Optional[str], recommendations: Optional[str], devils_advocate: Optional[str], false_positives: Optional[str]):
+    """Update fields of a code review."""
+    project = _require_project()
+    task = get_task(task_id)
+    if not task or task.project_id != project.id:
+        console.print(f"Task {task_id} not found in active project.")
+        return
+    cr_obj = get_review(task_id, cr_num)
+    if not cr_obj:
+        console.print(f"CR-{cr_num} not found for task #{task_id}.")
+        return
+    if recommendations == "-":
+        recommendations = sys.stdin.read()
+    if devils_advocate == "-":
+        devils_advocate = sys.stdin.read()
+    if false_positives == "-":
+        false_positives = sys.stdin.read()
+    updated = update_review(task_id, cr_num, reviewer=reviewer, recommendations=recommendations, devils_advocate=devils_advocate, false_positives=false_positives)
+    if updated:
+        console.print(f"Updated CR-{cr_num} for task #{task_id}.")
+
+
+@cr.command(name="delete")
+@click.argument("task_id", type=int)
+@click.argument("cr_num", type=int)
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
+def cr_delete(task_id: int, cr_num: int, yes: bool):
+    """Delete a code review."""
+    project = _require_project()
+    task = get_task(task_id)
+    if not task or task.project_id != project.id:
+        console.print(f"Task {task_id} not found in active project.")
+        return
+    if not yes and not click.confirm(f"Delete CR-{cr_num} for task {task_id}?"):
+        return
+    deleted = delete_review(task_id, cr_num)
+    if deleted:
+        console.print(f"Deleted CR-{cr_num} for task #{task_id}.")
+    else:
+        console.print(f"CR-{cr_num} not found for task #{task_id}.")
+
+
 # Utility commands
 
 
@@ -549,14 +706,20 @@ def clean(days: Optional[int], yes: bool):
 @click.option(
     "--format", "-f", "fmt", type=click.Choice(["json", "md"]), default="json"
 )
-def export(file: Optional[Path], fmt: str):
+@click.option("--include-notes", "include_notes", is_flag=True, help="Include notes and code reviews in export")
+def export(file: Optional[Path], fmt: str, include_notes: bool):
     """Export tasks to FILE (default stdout)."""
     project = _require_project()
     tasks = list_tasks(project.id, include_done=True)
     if fmt == "json":
-        payload = json.dumps(export_tasks(project.id), indent=2)
+        task_dicts = export_tasks(project.id)
+        if include_notes:
+            for td in task_dicts:
+                td["notes"] = [n.to_dict() for n in get_notes(td["id"])]
+                td["reviews"] = [r.to_dict() for r in get_reviews(td["id"])]
+        payload = json.dumps(task_dicts, indent=2)
     else:
-        payload = export_tasks_markdown(project, tasks)
+        payload = export_tasks_markdown(project, tasks, include_notes=include_notes)
 
     if file:
         file.write_text(payload)

@@ -11,7 +11,7 @@ from .utils import resolve_db_path
 class Database:
     """SQLite database singleton wrapper with schema migrations and transactions."""
 
-    SCHEMA_VERSION = 7
+    SCHEMA_VERSION = 8
 
     def __init__(self, db_path: Optional[Path] = None):
         self._db_path = db_path or resolve_db_path()
@@ -226,6 +226,30 @@ class Database:
             }
             if "plan" not in columns:
                 conn.execute("ALTER TABLE tasks ADD COLUMN plan TEXT")
+
+        if current < 8:
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS task_notes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                    author TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE TABLE IF NOT EXISTS task_reviews (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                    cr_num INTEGER NOT NULL,
+                    reviewer TEXT,
+                    recommendations TEXT,
+                    devils_advocate TEXT,
+                    false_positives TEXT,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE (task_id, cr_num)
+                );
+            """)
 
         if current < self.SCHEMA_VERSION:
             self._set_version(self.SCHEMA_VERSION)

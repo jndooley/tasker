@@ -200,3 +200,72 @@ class Task:
             if self.completed_at
             else None,
         }
+
+
+@dataclass
+class Note:
+    """Task note row model (immutable, append-only)."""
+
+    id: int
+    task_id: int
+    author: str
+    content: str
+    created_at: datetime
+
+    @classmethod
+    def from_row(cls, row: "sqlite3.Row") -> "Note":
+        return cls(
+            id=row["id"],
+            task_id=row["task_id"],
+            author=row["author"],
+            content=row["content"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "author": self.author,
+            "content": self.content,
+            "created_at": self.created_at.isoformat(),
+        }
+
+
+@dataclass
+class CodeReview:
+    """Code review row model."""
+
+    id: int
+    task_id: int
+    cr_num: int
+    reviewer: Optional[str]
+    recommendations: Optional[str]
+    devils_advocate: Optional[str]
+    false_positives: Optional[str]
+    created_at: datetime
+    updated_at: datetime
+
+    @classmethod
+    def from_row(cls, row: "sqlite3.Row") -> "CodeReview":
+        return cls(
+            id=row["id"],
+            task_id=row["task_id"],
+            cr_num=row["cr_num"],
+            reviewer=row["reviewer"],
+            recommendations=row["recommendations"],
+            devils_advocate=row["devils_advocate"],
+            false_positives=row["false_positives"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+            updated_at=datetime.fromisoformat(row["updated_at"]),
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            "cr_num": self.cr_num,
+            "reviewer": self.reviewer,
+            "recommendations": self.recommendations,
+            "devils_advocate": self.devils_advocate,
+            "false_positives": self.false_positives,
+            "created_at": self.created_at.isoformat(),
+            "updated_at": self.updated_at.isoformat(),
+        }

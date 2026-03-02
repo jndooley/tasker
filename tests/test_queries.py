@@ -333,6 +333,147 @@ def test_stats_include_blocked_count():
     assert stats["total"] == 2
 
 
+# Note tests
+
+
+def test_add_and_get_notes():
+    project = queries.create_project("/tmp/notesN1", "Notes N1")
+    task = queries.create_task(project.id, "Task with notes")
+
+    n1 = queries.add_note(task.id, "jason", "First note")
+    n2 = queries.add_note(task.id, "agent", "Second note")
+
+    notes = queries.get_notes(task.id)
+    assert len(notes) == 2
+    assert notes[0].id == n1.id
+    assert notes[0].author == "jason"
+    assert notes[0].content == "First note"
+    assert notes[1].id == n2.id
+    assert notes[1].author == "agent"
+
+
+def test_notes_ordered_chronologically():
+    project = queries.create_project("/tmp/notesN2", "Notes N2")
+    task = queries.create_task(project.id, "Chrono task")
+
+    n1 = queries.add_note(task.id, "jason", "Alpha")
+    n2 = queries.add_note(task.id, "jason", "Beta")
+
+    notes = queries.get_notes(task.id)
+    assert notes[0].created_at <= notes[1].created_at
+    assert notes[0].id == n1.id
+    assert notes[1].id == n2.id
+
+
+def test_notes_cascade_delete():
+    project = queries.create_project("/tmp/notesN3", "Notes N3")
+    task = queries.create_task(project.id, "Task to delete")
+    queries.add_note(task.id, "jason", "Will be deleted")
+
+    queries.delete_task(task.id)
+    assert queries.get_task(task.id) is None
+    # Notes should be gone (cascade), confirmed by direct query
+    from tasker.database import get_connection
+    conn = get_connection()
+    row = conn.execute("SELECT COUNT(*) as c FROM task_notes WHERE task_id = ?", (task.id,)).fetchone()
+    assert row["c"] == 0
+
+
+# Review tests
+
+
+def test_create_and_get_review_stub():
+    project = queries.create_project("/tmp/revR1", "Rev R1")
+    task = queries.create_task(project.id, "Reviewable task")
+
+    cr = queries.create_review_stub(task.id)
+    assert cr.cr_num == 1
+    assert cr.task_id == task.id
+    assert cr.reviewer is None
+
+
+def test_cr_num_auto_increments():
+    project = queries.create_project("/tmp/revR2", "Rev R2")
+    task = queries.create_task(project.id, "Task")
+
+    cr1 = queries.create_review_stub(task.id)
+    cr2 = queries.create_review_stub(task.id)
+    cr3 = queries.create_review_stub(task.id)
+
+    assert cr1.cr_num == 1
+    assert cr2.cr_num == 2
+    assert cr3.cr_num == 3
+
+
+def test_task_has_reviews():
+    project = queries.create_project("/tmp/revR3", "Rev R3")
+    task = queries.create_task(project.id, "Task")
+
+    assert queries.task_has_reviews(task.id) is False
+    queries.create_review_stub(task.id)
+    assert queries.task_has_reviews(task.id) is True
+
+
+def test_update_review_fields():
+    project = queries.create_project("/tmp/revR4", "Rev R4")
+    task = queries.create_task(project.id, "Task")
+    queries.create_review_stub(task.id)
+
+    updated = queries.update_review(task.id, 1, reviewer="jason", recommendations="Fix the thing")
+    assert updated is not None
+    assert updated.reviewer == "jason"
+    assert updated.recommendations == "Fix the thing"
+    assert updated.devils_advocate is None
+
+
+def test_get_review():
+    project = queries.create_project("/tmp/revR5", "Rev R5")
+    task = queries.create_task(project.id, "Task")
+    queries.create_review_stub(task.id)
+
+    cr = queries.get_review(task.id, 1)
+    assert cr is not None
+    assert cr.cr_num == 1
+
+    missing = queries.get_review(task.id, 99)
+    assert missing is None
+
+
+def test_delete_review():
+    project = queries.create_project("/tmp/revR6", "Rev R6")
+    task = queries.create_task(project.id, "Task")
+    queries.create_review_stub(task.id)
+
+    assert queries.delete_review(task.id, 1) is True
+    assert queries.get_review(task.id, 1) is None
+    assert queries.delete_review(task.id, 1) is False
+
+
+def test_review_task_auto_stubs_once():
+    project = queries.create_project("/tmp/revR7", "Rev R7")
+    task = queries.create_task(project.id, "Task")
+
+    # First call creates stub
+    queries.review_task(task.id)
+    assert len(queries.get_reviews(task.id)) == 1
+
+    # Second call does not create another stub
+    queries.review_task(task.id)
+    assert len(queries.get_reviews(task.id)) == 1
+
+
+def test_reviews_cascade_delete():
+    project = queries.create_project("/tmp/revR8", "Rev R8")
+    task = queries.create_task(project.id, "Task")
+    queries.create_review_stub(task.id)
+
+    queries.delete_task(task.id)
+    from tasker.database import get_connection
+    conn = get_connection()
+    row = conn.execute("SELECT COUNT(*) as c FROM task_reviews WHERE task_id = ?", (task.id,)).fetchone()
+    assert row["c"] == 0
+
+
 def test_check_constraints_enforced():
     project = queries.create_project("/tmp/projectG", "Project G")
     with transaction() as conn:

@@ -140,6 +140,69 @@ def test_migration_v3_to_v4_creates_task_relations(tmp_path, monkeypatch):
     assert "relation_type" in columns
 
 
+def test_migration_v8_creates_notes_and_reviews_tables(tmp_path, monkeypatch):
+    """Simulate a v7 database and verify migration to v8 creates task_notes and task_reviews."""
+    db_path = tmp_path / "migration_v7.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE projects (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            path TEXT NOT NULL UNIQUE,
+            name TEXT NOT NULL,
+            is_active INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE tasks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id INTEGER NOT NULL,
+            title TEXT NOT NULL,
+            description TEXT,
+            acceptance_criteria TEXT,
+            plan TEXT,
+            status TEXT NOT NULL DEFAULT 'todo' CHECK (status IN ('todo','in-progress','blocked','review','qa','done')),
+            priority INTEGER DEFAULT 0 CHECK (priority BETWEEN 0 AND 3),
+            order_index INTEGER DEFAULT 0,
+            group_id TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            completed_at TIMESTAMP,
+            FOREIGN KEY (project_id) REFERENCES projects (id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE metadata (
+            key TEXT PRIMARY KEY,
+            value TEXT,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        INSERT INTO metadata(key, value) VALUES ('schema_version', '7');
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setenv("TASKER_DB_PATH", str(db_path))
+    close_connection()
+
+    migrated = get_connection()
+    tables = {
+        row[0]
+        for row in migrated.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    assert "task_notes" in tables
+    assert "task_reviews" in tables
+
+    note_cols = {row["name"] for row in migrated.execute("PRAGMA table_info(task_notes)").fetchall()}
+    assert {"id", "task_id", "author", "content", "created_at"} <= note_cols
+
+    review_cols = {row["name"] for row in migrated.execute("PRAGMA table_info(task_reviews)").fetchall()}
+    assert {"id", "task_id", "cr_num", "reviewer", "recommendations", "devils_advocate", "false_positives", "created_at", "updated_at"} <= review_cols
+
+
 def test_migration_adds_group_id_column(tmp_path, monkeypatch):
     """Simulate a v2 database and verify migration to v3 adds group_id."""
     db_path = tmp_path / "migration_v2.db"

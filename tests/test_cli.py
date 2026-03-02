@@ -114,6 +114,131 @@ def test_cli_list_blocked_indicator(tmp_path, monkeypatch):
     assert "[B]" in list_res.output
 
 
+def test_cli_note_add_and_show(tmp_path, monkeypatch):
+    db_path = tmp_path / "cli.db"
+    monkeypatch.setenv("TASKER_DB_PATH", str(db_path))
+
+    runner = CliRunner()
+    runner.invoke(cli.cli, ["init", str(tmp_path)])
+    runner.invoke(cli.cli, ["add", "Task with notes"])
+
+    # Add a note
+    note_res = runner.invoke(cli.cli, ["note", "1", "Blocked on infra", "--author", "jason"])
+    assert note_res.exit_code == 0
+    assert "Note added" in note_res.output
+
+    # Show without --notes: no notes section
+    show_res = runner.invoke(cli.cli, ["show", "1"])
+    assert show_res.exit_code == 0
+    assert "Notes" not in show_res.output
+
+    # Show with --notes: notes section present
+    show_notes_res = runner.invoke(cli.cli, ["show", "1", "--notes"])
+    assert show_notes_res.exit_code == 0
+    assert "Notes" in show_notes_res.output
+    assert "Blocked on infra" in show_notes_res.output
+
+
+def test_cli_note_requires_author(tmp_path, monkeypatch):
+    db_path = tmp_path / "cli.db"
+    monkeypatch.setenv("TASKER_DB_PATH", str(db_path))
+
+    runner = CliRunner()
+    runner.invoke(cli.cli, ["init", str(tmp_path)])
+    runner.invoke(cli.cli, ["add", "Some task"])
+
+    # Missing --author should fail
+    result = runner.invoke(cli.cli, ["note", "1", "some content"])
+    assert result.exit_code != 0
+
+
+def test_cli_review_creates_cr1_stub(tmp_path, monkeypatch):
+    db_path = tmp_path / "cli.db"
+    monkeypatch.setenv("TASKER_DB_PATH", str(db_path))
+
+    runner = CliRunner()
+    runner.invoke(cli.cli, ["init", str(tmp_path)])
+    runner.invoke(cli.cli, ["add", "A task"])
+
+    # First review creates CR-1
+    review_res = runner.invoke(cli.cli, ["review", "1"])
+    assert review_res.exit_code == 0
+    assert "Created CR-1" in review_res.output
+
+    # Second review does not create another stub
+    review_res2 = runner.invoke(cli.cli, ["review", "1"])
+    assert review_res2.exit_code == 0
+    assert "Created CR-1" not in review_res2.output
+
+
+def test_cli_cr_workflow(tmp_path, monkeypatch):
+    db_path = tmp_path / "cli.db"
+    monkeypatch.setenv("TASKER_DB_PATH", str(db_path))
+
+    runner = CliRunner()
+    runner.invoke(cli.cli, ["init", str(tmp_path)])
+    runner.invoke(cli.cli, ["add", "A task"])
+    runner.invoke(cli.cli, ["review", "1"])
+
+    # cr list
+    list_res = runner.invoke(cli.cli, ["cr", "list", "1"])
+    assert list_res.exit_code == 0
+    assert "CR" in list_res.output
+
+    # cr update
+    update_res = runner.invoke(cli.cli, ["cr", "update", "1", "1", "--reviewer", "jason", "--recommendations", "Split the module"])
+    assert update_res.exit_code == 0
+    assert "Updated" in update_res.output
+
+    # cr show
+    show_res = runner.invoke(cli.cli, ["cr", "show", "1", "1"])
+    assert show_res.exit_code == 0
+    assert "jason" in show_res.output
+    assert "Split the module" in show_res.output
+
+    # cr add creates CR-2
+    add_res = runner.invoke(cli.cli, ["cr", "add", "1"])
+    assert add_res.exit_code == 0
+    assert "CR-2" in add_res.output
+
+    # cr delete with --yes
+    delete_res = runner.invoke(cli.cli, ["cr", "delete", "1", "2", "--yes"])
+    assert delete_res.exit_code == 0
+    assert "Deleted" in delete_res.output
+
+    # verify only CR-1 remains
+    list_res2 = runner.invoke(cli.cli, ["cr", "list", "1"])
+    assert "CR-2" not in list_res2.output
+
+
+def test_cli_export_include_notes(tmp_path, monkeypatch):
+    db_path = tmp_path / "cli.db"
+    monkeypatch.setenv("TASKER_DB_PATH", str(db_path))
+
+    runner = CliRunner()
+    runner.invoke(cli.cli, ["init", str(tmp_path)])
+    runner.invoke(cli.cli, ["add", "Task"])
+    runner.invoke(cli.cli, ["note", "1", "Important observation", "--author", "jason"])
+    runner.invoke(cli.cli, ["review", "1"])
+
+    # Export without --include-notes: no notes key
+    export_res = runner.invoke(cli.cli, ["export"])
+    assert export_res.exit_code == 0
+    payload = json.loads(export_res.output)
+    assert "notes" not in payload[0]
+    assert "reviews" not in payload[0]
+
+    # Export with --include-notes: notes and reviews present
+    export_notes_res = runner.invoke(cli.cli, ["export", "--include-notes"])
+    assert export_notes_res.exit_code == 0
+    payload2 = json.loads(export_notes_res.output)
+    assert "notes" in payload2[0]
+    assert len(payload2[0]["notes"]) == 1
+    assert payload2[0]["notes"][0]["author"] == "jason"
+    assert "reviews" in payload2[0]
+    assert len(payload2[0]["reviews"]) == 1
+
+
 def test_cli_acceptance_criteria_roundtrip(tmp_path, monkeypatch):
     db_path = tmp_path / "cli.db"
     monkeypatch.setenv("TASKER_DB_PATH", str(db_path))
