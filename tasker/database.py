@@ -91,7 +91,8 @@ class Database:
 
     def _ensure_metadata(self):
         conn = self._conn
-        assert conn is not None
+        if conn is None:
+            raise RuntimeError("No database connection")
         conn.execute(
             "INSERT OR IGNORE INTO metadata(key, value, updated_at) VALUES ('schema_version', '0', CURRENT_TIMESTAMP)"
         )
@@ -99,7 +100,8 @@ class Database:
 
     def _current_version(self) -> int:
         conn = self._conn
-        assert conn is not None
+        if conn is None:
+            raise RuntimeError("No database connection")
         row = conn.execute(
             "SELECT value FROM metadata WHERE key = 'schema_version'"
         ).fetchone()
@@ -107,7 +109,8 @@ class Database:
 
     def _set_version(self, version: int) -> None:
         conn = self._conn
-        assert conn is not None
+        if conn is None:
+            raise RuntimeError("No database connection")
         conn.execute(
             "UPDATE metadata SET value = ?, updated_at = CURRENT_TIMESTAMP WHERE key = 'schema_version'",
             (str(version),),
@@ -118,7 +121,8 @@ class Database:
         """Run forward migrations based on schema version."""
         current = self._current_version()
         conn = self._conn
-        assert conn is not None
+        if conn is None:
+            raise RuntimeError("No database connection")
 
         if current < 2:
             columns = {

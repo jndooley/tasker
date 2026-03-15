@@ -145,12 +145,7 @@ class Task:
     @classmethod
     def from_row(cls, row: "sqlite3.Row") -> "Task":
         """Hydrate a Task from a sqlite Row."""
-        row_keys = row.keys() if hasattr(row, "keys") else ()
-        raw_acceptance_criteria = (
-            row["acceptance_criteria"]
-            if "acceptance_criteria" in row_keys
-            else None
-        )
+        raw_acceptance_criteria = row["acceptance_criteria"]
         acceptance_criteria: List[str] = []
         if raw_acceptance_criteria:
             try:
@@ -159,21 +154,17 @@ class Task:
                     acceptance_criteria = [str(item) for item in parsed]
             except json.JSONDecodeError:
                 acceptance_criteria = []
-        row_group_id = (
-            row["group_id"] if "group_id" in row_keys else None
-        )
-        row_plan = row["plan"] if "plan" in row_keys else None
         return cls(
             id=row["id"],
             project_id=row["project_id"],
             title=row["title"],
             description=row["description"],
             acceptance_criteria=acceptance_criteria,
-            plan=row_plan,
+            plan=row["plan"],
             status=Status.from_value(row["status"]),
             priority=Priority.from_value(row["priority"]),
             order_index=row["order_index"],
-            group_id=row_group_id,
+            group_id=row["group_id"],
             created_at=datetime.fromisoformat(row["created_at"]),
             updated_at=datetime.fromisoformat(row["updated_at"]),
             completed_at=datetime.fromisoformat(row["completed_at"])

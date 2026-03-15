@@ -221,7 +221,7 @@ def update_task(
         params.append(title)
     if description is not None:
         sets.append("description = ?")
-        params.append(description)
+        params.append(description or None)
     if acceptance_criteria is not None:
         sets.append("acceptance_criteria = ?")
         params.append(_serialize_acceptance_criteria(acceptance_criteria))
@@ -244,7 +244,7 @@ def update_task(
         params.append(group_id)
     if plan is not None:
         sets.append("plan = ?")
-        params.append(plan)
+        params.append(plan or None)
     if not sets:
         return get_task(task_id)
 
@@ -252,20 +252,36 @@ def update_task(
     params.append(task_id)
 
     with get_db().transaction() as conn:
-        old_status_val: Optional[str] = None
-        if status is not None and agent is not None:
-            old_row = conn.execute(
-                "SELECT status FROM tasks WHERE id = ?", (task_id,)
-            ).fetchone()
-            old_status_val = old_row["status"] if old_row else None
+        old: dict = {}
+        if agent is not None:
+            old_row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+            if old_row:
+                old = dict(old_row)
 
         conn.execute(
             f"UPDATE tasks SET {', '.join(sets)} WHERE id = ?",
             params,
         )
 
-        if status is not None and agent is not None and old_status_val is not None:
-            record_history(conn, task_id, agent, "status", old_status_val, status.value)
+        if agent is not None and old:
+            if title is not None and old.get("title") != title:
+                record_history(conn, task_id, agent, "title", old.get("title"), title)
+            if description is not None:
+                new_desc = description or None
+                if old.get("description") != new_desc:
+                    record_history(conn, task_id, agent, "description", old.get("description"), new_desc)
+            if status is not None and old.get("status") != status.value:
+                record_history(conn, task_id, agent, "status", old.get("status"), status.value)
+            if priority is not None and old.get("priority") != int(priority):
+                record_history(conn, task_id, agent, "priority", str(old.get("priority")), str(int(priority)))
+            if plan is not None:
+                new_plan = plan or None
+                if old.get("plan") != new_plan:
+                    record_history(conn, task_id, agent, "plan", old.get("plan"), new_plan)
+            if clear_group or group_id is not None:
+                new_gid = None if clear_group else group_id
+                if old.get("group_id") != new_gid:
+                    record_history(conn, task_id, agent, "group_id", old.get("group_id"), new_gid)
 
         return get_task(task_id)
 
@@ -305,27 +321,12 @@ def reorder_task(task_id: int, position: int) -> Optional[Task]:
         return get_task(task_id)
 
 
-def start_task(task_id: int, agent: Optional[str] = None) -> Optional[Task]:
-    """Set task status to in-progress."""
-    return update_task(task_id, status=Status.IN_PROGRESS, agent=agent)
-
-
-def complete_task(task_id: int, agent: Optional[str] = None) -> Optional[Task]:
-    """Set task status to done and mark completion time."""
-    return update_task(task_id, status=Status.DONE, agent=agent)
-
-
-def review_task(task_id: int, agent: Optional[str] = None) -> Optional[Task]:
-    """Set task status to review and auto-create CR-1 stub on first call."""
+def review_task(task_id: int, agent: Optional[str] = None, create_stub: bool = True) -> Optional[Task]:
+    """Set task status to review; auto-creates CR-1 stub on first call unless create_stub=False."""
     updated = update_task(task_id, status=Status.REVIEW, agent=agent)
-    if updated and not task_has_reviews(task_id):
+    if create_stub and updated and not task_has_reviews(task_id):
         create_review_stub(task_id)
     return updated
-
-
-def qa_task(task_id: int, agent: Optional[str] = None) -> Optional[Task]:
-    """Set task status to qa."""
-    return update_task(task_id, status=Status.QA, agent=agent)
 
 
 def block_task(task_id: int, blocker_id: int, agent: Optional[str] = None) -> Task:
@@ -460,10 +461,15 @@ def add_relation(
     if source.project_id != target.project_id:
         raise ValueError("Tasks must belong to the same project.")
     with get_db().transaction() as conn:
-        cur = conn.execute(
-            "INSERT INTO task_relations(source_task_id, target_task_id, relation_type) VALUES (?, ?, ?)",
-            (source_task_id, target_task_id, relation_type.value),
-        )
+        try:
+            cur = conn.execute(
+                "INSERT INTO task_relations(source_task_id, target_task_id, relation_type) VALUES (?, ?, ?)",
+                (source_task_id, target_task_id, relation_type.value),
+            )
+        except sqlite3.IntegrityError:
+            raise ValueError(
+                f"A '{relation_type.value}' relation already exists between #{source_task_id} and #{target_task_id}."
+            )
         row = conn.execute(
             "SELECT * FROM task_relations WHERE id = ?", (cur.lastrowid,)
         ).fetchone()

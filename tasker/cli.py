@@ -29,13 +29,11 @@ from .queries import (
     add_relation,
     block_task,
     clean_completed,
-    complete_task,
     create_project,
     create_review_stub,
     create_task,
     delete_review,
     delete_task,
-    export_tasks,
     get_active_project,
     get_focus_task,
     get_notes,
@@ -50,12 +48,11 @@ from .queries import (
     list_groups,
     list_projects,
     list_tasks,
-    qa_task,
     remove_relation,
     reorder_task,
     review_task,
     set_active_project,
-    start_task,
+    task_has_reviews,
     update_review,
     update_task,
 )
@@ -99,18 +96,16 @@ def _parse_status(status: Optional[str]) -> Optional[Status]:
 def _require_project():
     project = get_active_project()
     if not project:
-        click.echo("No active project. Run `tasker init` first.")
-        raise click.Abort()
+        raise click.ClickException("No active project. Run `tasker init` first.")
     return project
 
 
 def _require_task(task_id: int):
-    """Fetch task in the active project, aborting if not found."""
+    """Fetch task in the active project, raising ClickException if not found."""
     project = _require_project()
     task = get_task(task_id)
     if not task or task.project_id != project.id:
-        console.print(f"Task {task_id} not found in active project.")
-        raise click.Abort()
+        raise click.ClickException(f"Task {task_id} not found in active project.")
     return task
 
 
@@ -230,6 +225,8 @@ def add(
     plan: Optional[str],
 ):
     """Add a task to the active project."""
+    if not title.strip():
+        raise click.BadParameter("Title cannot be blank.", param_hint="'TITLE'")
     project = _require_project()
     acceptance_criteria_value = _parse_acceptance_criteria(
         acceptance_criteria, acceptance_criteria_json
@@ -293,7 +290,7 @@ def list_cmd(
 
 
 @cli.command()
-@click.argument("task_id", type=int)
+@click.argument("task_id", type=click.IntRange(min=1))
 @click.option("--notes", "show_notes", is_flag=True, help="Also show notes and code reviews")
 @click.option("--history", "show_history", is_flag=True, help="Show history log")
 def show(task_id: int, show_notes: bool, show_history: bool):
@@ -312,7 +309,7 @@ def show(task_id: int, show_notes: bool, show_history: bool):
 
 
 @cli.command()
-@click.argument("task_id", type=int)
+@click.argument("task_id", type=click.IntRange(min=1))
 @click.option("--title", "-t", help="New title")
 @click.option("--description", "-d", help="New description")
 @click.option(
@@ -374,56 +371,56 @@ def update(
 
 
 @cli.command()
-@click.argument("task_id", type=int)
+@click.argument("task_id", type=click.IntRange(min=1))
 @click.option("--agent", default=None, help="Agent or user performing this action")
 def start(task_id: int, agent: Optional[str]):
     """Mark a task as in-progress."""
     _require_task(task_id)
-    updated = start_task(task_id, agent=_get_agent(agent))
+    updated = update_task(task_id, status=Status.IN_PROGRESS, agent=_get_agent(agent))
     if updated:
         console.print(f"Task #{task_id} started")
 
 
 @cli.command()
-@click.argument("task_id", type=int)
+@click.argument("task_id", type=click.IntRange(min=1))
 @click.option("--agent", default=None, help="Agent or user performing this action")
-def review(task_id: int, agent: Optional[str]):
+@click.option("--no-stub", "no_stub", is_flag=True, help="Do not auto-create a CR stub")
+def review(task_id: int, agent: Optional[str], no_stub: bool):
     """Mark a task as in review."""
     _require_task(task_id)
-    from .queries import task_has_reviews
     had_reviews = task_has_reviews(task_id)
-    updated = review_task(task_id, agent=_get_agent(agent))
+    updated = review_task(task_id, agent=_get_agent(agent), create_stub=not no_stub)
     if updated:
         console.print(f"Task #{task_id} in review")
-        if not had_reviews:
+        if not no_stub and not had_reviews:
             console.print(f"Created CR-1. Use 'tasker cr update {task_id} 1' to fill in details.")
 
 
 @cli.command()
-@click.argument("task_id", type=int)
+@click.argument("task_id", type=click.IntRange(min=1))
 @click.option("--agent", default=None, help="Agent or user performing this action")
 def qa(task_id: int, agent: Optional[str]):
     """Mark a task as in QA."""
     _require_task(task_id)
-    updated = qa_task(task_id, agent=_get_agent(agent))
+    updated = update_task(task_id, status=Status.QA, agent=_get_agent(agent))
     if updated:
         console.print(f"Task #{task_id} in QA")
 
 
 @cli.command()
-@click.argument("task_id", type=int)
+@click.argument("task_id", type=click.IntRange(min=1))
 @click.option("--agent", default=None, help="Agent or user performing this action")
 def done(task_id: int, agent: Optional[str]):
     """Mark a task as done."""
     _require_task(task_id)
-    updated = complete_task(task_id, agent=_get_agent(agent))
+    updated = update_task(task_id, status=Status.DONE, agent=_get_agent(agent))
     if updated:
         console.print(f"Task #{task_id} completed")
 
 
 @cli.command()
-@click.argument("task_id", type=int)
-@click.argument("blocker_id", type=int)
+@click.argument("task_id", type=click.IntRange(min=1))
+@click.argument("blocker_id", type=click.IntRange(min=1))
 @click.option("--agent", default=None, help="Agent or user performing this action")
 def block(task_id: int, blocker_id: int, agent: Optional[str]):
     """Mark a task as blocked by another task."""
@@ -433,24 +430,41 @@ def block(task_id: int, blocker_id: int, agent: Optional[str]):
         block_task(task_id, blocker_id, agent=_get_agent(agent))
         console.print(f"Task #{task_id} blocked by #{blocker_id}")
     except ValueError as exc:
-        console.print(f"Error: {exc}")
+        raise click.ClickException(str(exc))
 
 
 @cli.command()
-@click.argument("task_id", type=int)
+@click.argument("task_id", type=click.IntRange(min=1))
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
 def delete(task_id: int, yes: bool):
     """Delete a task."""
-    _require_task(task_id)
-    if not yes and not click.confirm(f"Delete task #{task_id}?"):
-        return
+    task = _require_task(task_id)
+    if not yes:
+        notes = get_notes(task_id)
+        reviews = get_reviews(task_id)
+        history = get_task_history(task_id)
+        relations = get_relations(task_id)
+        cascades = []
+        if notes:
+            cascades.append(f"{len(notes)} note(s)")
+        if reviews:
+            cascades.append(f"{len(reviews)} code review(s)")
+        if history:
+            cascades.append(f"{len(history)} history entry/entries")
+        if relations:
+            cascades.append(f"{len(relations)} relation(s)")
+        prompt = f"Delete task #{task_id} '{task.title}'?"
+        if cascades:
+            prompt += f" Also deletes: {', '.join(cascades)}."
+        if not click.confirm(prompt):
+            return
     delete_task(task_id)
     console.print(f"Deleted task #{task_id}")
 
 
 @cli.command()
-@click.argument("task_id", type=int)
-@click.argument("position", type=int)
+@click.argument("task_id", type=click.IntRange(min=1))
+@click.argument("position", type=click.IntRange(min=1))
 def reorder(task_id: int, position: int):
     """Move a task to POSITION (1-based)."""
     _require_task(task_id)
@@ -475,8 +489,8 @@ RELATION_TYPE_CHOICES = [rt.value for rt in RelationType]
 
 
 @cli.command()
-@click.argument("source_id", type=int)
-@click.argument("target_id", type=int)
+@click.argument("source_id", type=click.IntRange(min=1))
+@click.argument("target_id", type=click.IntRange(min=1))
 @click.option(
     "--type", "-t", "relation_type",
     type=click.Choice(RELATION_TYPE_CHOICES),
@@ -485,26 +499,19 @@ RELATION_TYPE_CHOICES = [rt.value for rt in RelationType]
 )
 def link(source_id: int, target_id: int, relation_type: str):
     """Link two tasks with a relation."""
-    project = _require_project()
-    source = get_task(source_id)
-    if not source or source.project_id != project.id:
-        console.print(f"Task {source_id} not found in active project.")
-        return
-    target = get_task(target_id)
-    if not target or target.project_id != project.id:
-        console.print(f"Task {target_id} not found in active project.")
-        return
+    _require_task(source_id)
+    _require_task(target_id)
     try:
         rt = RelationType.from_value(relation_type)
         rel = add_relation(source_id, target_id, rt)
         console.print(f"Linked #{source_id} --{rel.relation_type.value}--> #{target_id}")
-    except (ValueError, Exception) as exc:
-        console.print(f"Error: {exc}")
+    except Exception as exc:
+        raise click.ClickException(str(exc))
 
 
 @cli.command()
-@click.argument("source_id", type=int)
-@click.argument("target_id", type=int)
+@click.argument("source_id", type=click.IntRange(min=1))
+@click.argument("target_id", type=click.IntRange(min=1))
 @click.option(
     "--type", "-t", "relation_type",
     type=click.Choice(RELATION_TYPE_CHOICES),
@@ -526,7 +533,7 @@ def unlink(source_id: int, target_id: int, relation_type: str):
 
 
 @cli.command()
-@click.argument("task_id", type=int)
+@click.argument("task_id", type=click.IntRange(min=1))
 @click.argument("content")
 @click.option("--author", "-a", required=True, help="Note author (required)")
 def note(task_id: int, content: str, author: str):
@@ -547,7 +554,7 @@ def cr():
 
 
 @cr.command(name="list")
-@click.argument("task_id", type=int)
+@click.argument("task_id", type=click.IntRange(min=1))
 def cr_list(task_id: int):
     """List all code reviews for a task."""
     _require_task(task_id)
@@ -573,8 +580,8 @@ def cr_list(task_id: int):
 
 
 @cr.command(name="show")
-@click.argument("task_id", type=int)
-@click.argument("cr_num", type=int)
+@click.argument("task_id", type=click.IntRange(min=1))
+@click.argument("cr_num", type=click.IntRange(min=1))
 def cr_show(task_id: int, cr_num: int):
     """Show full detail of one code review."""
     _require_task(task_id)
@@ -586,7 +593,7 @@ def cr_show(task_id: int, cr_num: int):
 
 
 @cr.command(name="add")
-@click.argument("task_id", type=int)
+@click.argument("task_id", type=click.IntRange(min=1))
 def cr_add(task_id: int):
     """Create a new code review stub for a task."""
     _require_task(task_id)
@@ -596,8 +603,8 @@ def cr_add(task_id: int):
 
 
 @cr.command(name="update")
-@click.argument("task_id", type=int)
-@click.argument("cr_num", type=int)
+@click.argument("task_id", type=click.IntRange(min=1))
+@click.argument("cr_num", type=click.IntRange(min=1))
 @click.option("--reviewer", "-r", help="Name of reviewer")
 @click.option("--recommendations", "-R", help="Core findings and suggested changes (or - for stdin)")
 @click.option("--devils-advocate", "-d", "devils_advocate", help="Reviewer's self-critique (or - for stdin)")
@@ -621,8 +628,8 @@ def cr_update(task_id: int, cr_num: int, reviewer: Optional[str], recommendation
 
 
 @cr.command(name="delete")
-@click.argument("task_id", type=int)
-@click.argument("cr_num", type=int)
+@click.argument("task_id", type=click.IntRange(min=1))
+@click.argument("cr_num", type=click.IntRange(min=1))
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
 def cr_delete(task_id: int, cr_num: int, yes: bool):
     """Delete a code review."""
@@ -685,7 +692,7 @@ def export(file: Optional[Path], fmt: str, include_notes: bool, include_history:
     project = _require_project()
     tasks = list_tasks(project.id, include_done=True)
     if fmt == "json":
-        task_dicts = export_tasks(project.id)
+        task_dicts = [t.to_dict() for t in tasks]
         if include_notes:
             for td in task_dicts:
                 td["notes"] = [n.to_dict() for n in get_notes(td["id"])]

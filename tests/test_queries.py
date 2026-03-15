@@ -25,7 +25,7 @@ def test_task_focus_prefers_in_progress():
     assert focus is not None
     assert focus.id == t2.id  # in-progress beats todo
 
-    queries.complete_task(t2.id)
+    queries.update_task(t2.id, status=Status.DONE)
     focus_after = queries.get_focus_task(project.id)
     assert focus_after.id == t1.id
 
@@ -220,7 +220,7 @@ def test_is_blocked():
     assert queries.is_blocked(t1.id) is False
 
     # Complete the blocker -> no longer blocked
-    queries.complete_task(t1.id)
+    queries.update_task(t1.id, status=Status.DONE)
     assert queries.is_blocked(t2.id) is False
 
 
@@ -237,7 +237,7 @@ def test_focus_skips_blocked_tasks():
     assert focus.id == t1.id
 
     # Complete blocker, focus should now pick t2 (higher priority)
-    queries.complete_task(t1.id)
+    queries.update_task(t1.id, status=Status.DONE)
     focus = queries.get_focus_task(project.id)
     assert focus is not None
     assert focus.id == t2.id
@@ -494,8 +494,8 @@ def test_history_recorded_on_status_change():
     project = queries.create_project("/tmp/histH1", "Hist H1")
     task = queries.create_task(project.id, "History task")
 
-    queries.start_task(task.id, agent="claude-sonnet-4-6")
-    queries.complete_task(task.id, agent="jason")
+    queries.update_task(task.id, status=Status.IN_PROGRESS, agent="claude-sonnet-4-6")
+    queries.update_task(task.id, status=Status.DONE, agent="jason")
 
     history = queries.get_task_history(task.id)
     assert len(history) == 2
@@ -515,7 +515,7 @@ def test_history_not_recorded_without_agent():
     project = queries.create_project("/tmp/histH2", "Hist H2")
     task = queries.create_task(project.id, "No agent task")
 
-    queries.start_task(task.id)  # no agent
+    queries.update_task(task.id, status=Status.IN_PROGRESS)  # no agent
     history = queries.get_task_history(task.id)
     assert history == []
 
@@ -523,7 +523,7 @@ def test_history_not_recorded_without_agent():
 def test_history_cascade_delete():
     project = queries.create_project("/tmp/histH3", "Hist H3")
     task = queries.create_task(project.id, "Task with history")
-    queries.start_task(task.id, agent="bot")
+    queries.update_task(task.id, status=Status.IN_PROGRESS, agent="bot")
 
     queries.delete_task(task.id)
     conn = get_db().connect()

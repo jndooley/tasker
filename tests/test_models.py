@@ -29,6 +29,7 @@ def test_task_to_dict_and_from_row_roundtrip():
         "title": "T",
         "description": "d",
         "acceptance_criteria": json.dumps(["criterion one", "criterion two"]),
+        "plan": None,
         "status": "in-progress",
         "priority": 2,
         "order_index": 1000,
