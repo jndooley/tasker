@@ -269,3 +269,38 @@ class CodeReview:
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),
         }
+
+
+@dataclass
+class HistoryEntry:
+    """Task history row model — records every field change with agent attribution."""
+
+    id: int
+    task_id: int
+    agent: str
+    field: str
+    old_value: Optional[str]
+    new_value: Optional[str]
+    changed_at: datetime
+
+    @classmethod
+    def from_row(cls, row: "sqlite3.Row") -> "HistoryEntry":
+        return cls(
+            id=row["id"],
+            task_id=row["task_id"],
+            agent=row["agent"],
+            field=row["field"],
+            old_value=row["old_value"],
+            new_value=row["new_value"],
+            changed_at=datetime.fromisoformat(row["changed_at"]),
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "agent": self.agent,
+            "field": self.field,
+            "old_value": self.old_value,
+            "new_value": self.new_value,
+            "changed_at": self.changed_at.isoformat(),
+        }

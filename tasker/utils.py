@@ -67,6 +67,9 @@ def parse_ts(ts: Optional[str]) -> Optional[datetime]:
         return None
 
 
+TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M"
+
+
 def format_ts(ts: Optional[Union[str, datetime]]) -> str:
     """Format datetimes or strings into human-readable short form."""
     if ts is None:
@@ -76,4 +79,4 @@ def format_ts(ts: Optional[Union[str, datetime]]) -> str:
         if parsed is None:
             return ts
         ts = parsed
-    return ts.strftime("%Y-%m-%d %H:%M")
+    return ts.strftime(TIMESTAMP_FORMAT)

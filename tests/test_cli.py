@@ -239,6 +239,94 @@ def test_cli_export_include_notes(tmp_path, monkeypatch):
     assert len(payload2[0]["reviews"]) == 1
 
 
+def test_cli_agent_option_records_history(tmp_path, monkeypatch):
+    db_path = tmp_path / "cli.db"
+    monkeypatch.setenv("TASKER_DB_PATH", str(db_path))
+
+    runner = CliRunner()
+    runner.invoke(cli.cli, ["init", str(tmp_path)])
+    runner.invoke(cli.cli, ["add", "Task"])
+
+    # start with explicit agent
+    start_res = runner.invoke(cli.cli, ["start", "1", "--agent", "claude-sonnet-4-6"])
+    assert start_res.exit_code == 0
+
+    # done with explicit agent
+    done_res = runner.invoke(cli.cli, ["done", "1", "--agent", "jason"])
+    assert done_res.exit_code == 0
+
+    # verify history via show --history
+    show_res = runner.invoke(cli.cli, ["show", "1", "--history"])
+    assert show_res.exit_code == 0
+    assert "History" in show_res.output
+    assert "claude-sonnet-4-6" in show_res.output
+    assert "jason" in show_res.output
+    assert "todo" in show_res.output
+    assert "in-progress" in show_res.output
+    assert "done" in show_res.output
+
+
+def test_cli_agent_defaults_to_env_var(tmp_path, monkeypatch):
+    db_path = tmp_path / "cli.db"
+    monkeypatch.setenv("TASKER_DB_PATH", str(db_path))
+    monkeypatch.setenv("TASKER_AGENT", "env-agent")
+
+    runner = CliRunner()
+    runner.invoke(cli.cli, ["init", str(tmp_path)])
+    runner.invoke(cli.cli, ["add", "Task"])
+    runner.invoke(cli.cli, ["start", "1"])  # no --agent, should use $TASKER_AGENT
+
+    show_res = runner.invoke(cli.cli, ["show", "1", "--history"])
+    assert "env-agent" in show_res.output
+
+
+def test_cli_show_history_flag(tmp_path, monkeypatch):
+    db_path = tmp_path / "cli.db"
+    monkeypatch.setenv("TASKER_DB_PATH", str(db_path))
+
+    runner = CliRunner()
+    runner.invoke(cli.cli, ["init", str(tmp_path)])
+    runner.invoke(cli.cli, ["add", "Task"])
+
+    # show without --history: no History section
+    show_res = runner.invoke(cli.cli, ["show", "1"])
+    assert show_res.exit_code == 0
+    assert "History" not in show_res.output
+
+    # show with --history: History section present (empty)
+    show_hist_res = runner.invoke(cli.cli, ["show", "1", "--history"])
+    assert show_hist_res.exit_code == 0
+    assert "History" in show_hist_res.output
+
+
+def test_cli_export_include_history(tmp_path, monkeypatch):
+    db_path = tmp_path / "cli.db"
+    monkeypatch.setenv("TASKER_DB_PATH", str(db_path))
+
+    runner = CliRunner()
+    runner.invoke(cli.cli, ["init", str(tmp_path)])
+    runner.invoke(cli.cli, ["add", "Task"])
+    runner.invoke(cli.cli, ["start", "1", "--agent", "bot"])
+    runner.invoke(cli.cli, ["done", "1", "--agent", "human"])
+
+    # Export without --include-history: no history key
+    export_res = runner.invoke(cli.cli, ["export"])
+    assert export_res.exit_code == 0
+    payload = json.loads(export_res.output)
+    assert "history" not in payload[0]
+
+    # Export with --include-history: history array present
+    export_hist_res = runner.invoke(cli.cli, ["export", "--include-history"])
+    assert export_hist_res.exit_code == 0
+    payload2 = json.loads(export_hist_res.output)
+    assert "history" in payload2[0]
+    assert len(payload2[0]["history"]) == 2
+    assert payload2[0]["history"][0]["agent"] == "bot"
+    assert payload2[0]["history"][0]["new_value"] == "in-progress"
+    assert payload2[0]["history"][1]["agent"] == "human"
+    assert payload2[0]["history"][1]["new_value"] == "done"
+
+
 def test_cli_acceptance_criteria_roundtrip(tmp_path, monkeypatch):
     db_path = tmp_path / "cli.db"
     monkeypatch.setenv("TASKER_DB_PATH", str(db_path))

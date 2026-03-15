@@ -1,13 +1,13 @@
 """Rich formatting helpers for Tasker output."""
 
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
-from .models import CodeReview, Note, Priority, Project, Status, Task
-from .utils import format_ts
+from .models import CodeReview, HistoryEntry, Note, Priority, Project, Status, Task
+from .utils import TIMESTAMP_FORMAT, format_ts
 
 console = Console()
 
@@ -186,7 +186,7 @@ def format_notes(notes: List[Note]) -> None:
         console.print("[dim](no notes)[/dim]")
         return
     for note in notes:
-        ts = note.created_at.strftime("%Y-%m-%d %H:%M")
+        ts = note.created_at.strftime(TIMESTAMP_FORMAT)
         console.print(f"[dim][{ts}][/dim]  {note.author}")
         console.print(note.content)
         console.print()
@@ -200,7 +200,7 @@ def format_reviews(reviews: List[CodeReview]) -> None:
         console.print("[dim](no reviews)[/dim]")
         return
     for cr in reviews:
-        ts = cr.created_at.strftime("%Y-%m-%d %H:%M")
+        ts = cr.created_at.strftime(TIMESTAMP_FORMAT)
         reviewer_str = f"  Reviewer: {cr.reviewer}" if cr.reviewer else ""
         console.print(f"[bold]CR-{cr.cr_num}[/bold]  {ts}{reviewer_str}")
         console.print()
@@ -221,6 +221,22 @@ def format_reviews(reviews: List[CodeReview]) -> None:
             console.print()
 
 
+def format_history(history: List[HistoryEntry]) -> None:
+    """Render history log section."""
+    console.print("[bold]History[/bold]")
+    console.print("─" * 41)
+    if not history:
+        console.print("[dim](no history)[/dim]")
+        return
+    for entry in history:
+        ts = entry.changed_at.strftime(TIMESTAMP_FORMAT)
+        old = entry.old_value or "(none)"
+        new = entry.new_value or "(none)"
+        console.print(
+            f"[dim][{ts}][/dim]  {entry.agent}  {entry.field}: {old} → {new}"
+        )
+
+
 def print_stats(stats: dict):
     """Render simple stats table."""
     table = Table(title="Stats")
@@ -229,3 +245,74 @@ def print_stats(stats: dict):
     for key in ["total", "todo", "in_progress", "review", "qa", "blocked", "done"]:
         table.add_row(key, str(stats.get(key, 0)))
     console.print(table)
+
+
+def export_tasks_markdown(
+    project: Project,
+    tasks: List[Task],
+    include_notes: bool = False,
+    include_history: bool = False,
+) -> str:
+    """Render tasks as a Markdown document grouped by status."""
+    from .queries import get_notes, get_reviews, get_task_history
+
+    lines = [f"# Tasks for {project.name}", ""]
+    by_status: Dict[Status, List[Task]] = {
+        Status.TODO: [],
+        Status.IN_PROGRESS: [],
+        Status.REVIEW: [],
+        Status.QA: [],
+        Status.BLOCKED: [],
+        Status.DONE: [],
+    }
+    for t in tasks:
+        by_status[t.status].append(t)
+    for status, title in [
+        (Status.IN_PROGRESS, "In Progress"),
+        (Status.REVIEW, "Review"),
+        (Status.QA, "QA"),
+        (Status.BLOCKED, "Blocked"),
+        (Status.TODO, "Todo"),
+        (Status.DONE, "Done"),
+    ]:
+        lines.append(f"## {title}")
+        if not by_status[status]:
+            lines.append("(none)\n")
+            continue
+        for t in by_status[status]:
+            pr = ["", "(low)", "(medium)", "(high)"][int(t.priority)]
+            grp = f" [{t.group_id}]" if t.group_id else ""
+            lines.append(
+                f"- [ {'x' if status == Status.DONE else ' '} ] {t.title} {pr}{grp}\n  {t.description or ''}"
+            )
+            if include_notes:
+                notes = get_notes(t.id)
+                if notes:
+                    lines.append("  **Notes:**")
+                    for n in notes:
+                        ts = n.created_at.strftime(TIMESTAMP_FORMAT)
+                        lines.append(f"  - [{ts}] {n.author}: {n.content}")
+                reviews = get_reviews(t.id)
+                if reviews:
+                    lines.append("  **Code Reviews:**")
+                    for cr in reviews:
+                        ts = cr.created_at.strftime(TIMESTAMP_FORMAT)
+                        reviewer_str = f" — Reviewer: {cr.reviewer}" if cr.reviewer else ""
+                        lines.append(f"  - CR-{cr.cr_num} ({ts}{reviewer_str})")
+                        if cr.recommendations:
+                            lines.append(f"    - Recommendations: {cr.recommendations}")
+                        if cr.devils_advocate:
+                            lines.append(f"    - Devil's Advocate: {cr.devils_advocate}")
+                        if cr.false_positives:
+                            lines.append(f"    - False Positives: {cr.false_positives}")
+            if include_history:
+                history = get_task_history(t.id)
+                if history:
+                    lines.append("  **History:**")
+                    for h in history:
+                        ts = h.changed_at.strftime(TIMESTAMP_FORMAT)
+                        old = h.old_value or "(none)"
+                        new = h.new_value or "(none)"
+                        lines.append(f"  - [{ts}] {h.agent}  {h.field}: {old} → {new}")
+        lines.append("")
+    return "\n".join(lines)

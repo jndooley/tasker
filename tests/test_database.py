@@ -1,13 +1,13 @@
 import sqlite3
 
-from tasker.database import close_connection, get_connection, transaction
+from tasker.database import close_connection, get_db
 from tasker import queries
 
 
 def test_transaction_rolls_back_on_error():
     project = queries.create_project("/tmp/db_project", "DB Project")
     try:
-        with transaction() as conn:
+        with get_db().transaction() as conn:
             conn.execute(
                 "INSERT INTO tasks(project_id, title, status, priority) VALUES (?, ?, ?, ?)",
                 (project.id, "Bad", "todo", 0),
@@ -21,8 +21,8 @@ def test_transaction_rolls_back_on_error():
 
 
 def test_connection_reused():
-    conn1 = get_connection()
-    conn2 = get_connection()
+    conn1 = get_db().connect()
+    conn2 = get_db().connect()
     assert conn1 is conn2
 
 
@@ -68,7 +68,7 @@ def test_migration_adds_acceptance_criteria_column(tmp_path, monkeypatch):
     monkeypatch.setenv("TASKER_DB_PATH", str(db_path))
     close_connection()
 
-    migrated = get_connection()
+    migrated = get_db().connect()
     columns = {
         row["name"] for row in migrated.execute("PRAGMA table_info(tasks)").fetchall()
     }
@@ -121,7 +121,7 @@ def test_migration_v3_to_v4_creates_task_relations(tmp_path, monkeypatch):
     monkeypatch.setenv("TASKER_DB_PATH", str(db_path))
     close_connection()
 
-    migrated = get_connection()
+    migrated = get_db().connect()
     tables = {
         row[0]
         for row in migrated.execute(
@@ -186,7 +186,7 @@ def test_migration_v8_creates_notes_and_reviews_tables(tmp_path, monkeypatch):
     monkeypatch.setenv("TASKER_DB_PATH", str(db_path))
     close_connection()
 
-    migrated = get_connection()
+    migrated = get_db().connect()
     tables = {
         row[0]
         for row in migrated.execute(
@@ -247,8 +247,88 @@ def test_migration_adds_group_id_column(tmp_path, monkeypatch):
     monkeypatch.setenv("TASKER_DB_PATH", str(db_path))
     close_connection()
 
-    migrated = get_connection()
+    migrated = get_db().connect()
     columns = {
         row["name"] for row in migrated.execute("PRAGMA table_info(tasks)").fetchall()
     }
     assert "group_id" in columns
+
+
+def test_migration_v9_creates_task_history_table(tmp_path, monkeypatch):
+    """Simulate a v8 database and verify migration to v9 creates task_history."""
+    db_path = tmp_path / "migration_v8.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE projects (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            path TEXT NOT NULL UNIQUE,
+            name TEXT NOT NULL,
+            is_active INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE tasks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id INTEGER NOT NULL,
+            title TEXT NOT NULL,
+            description TEXT,
+            acceptance_criteria TEXT,
+            plan TEXT,
+            status TEXT NOT NULL DEFAULT 'todo' CHECK (status IN ('todo','in-progress','blocked','review','qa','done')),
+            priority INTEGER DEFAULT 0 CHECK (priority BETWEEN 0 AND 3),
+            order_index INTEGER DEFAULT 0,
+            group_id TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            completed_at TIMESTAMP,
+            FOREIGN KEY (project_id) REFERENCES projects (id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE task_notes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+            author TEXT NOT NULL,
+            content TEXT NOT NULL,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE task_reviews (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+            cr_num INTEGER NOT NULL,
+            reviewer TEXT,
+            recommendations TEXT,
+            devils_advocate TEXT,
+            false_positives TEXT,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE (task_id, cr_num)
+        );
+
+        CREATE TABLE metadata (
+            key TEXT PRIMARY KEY,
+            value TEXT,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        INSERT INTO metadata(key, value) VALUES ('schema_version', '8');
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setenv("TASKER_DB_PATH", str(db_path))
+    close_connection()
+
+    migrated = get_db().connect()
+    tables = {
+        row[0]
+        for row in migrated.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    assert "task_history" in tables
+
+    history_cols = {row["name"] for row in migrated.execute("PRAGMA table_info(task_history)").fetchall()}
+    assert {"id", "task_id", "agent", "field", "old_value", "new_value", "changed_at"} <= history_cols

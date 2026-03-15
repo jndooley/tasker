@@ -3,7 +3,7 @@ import sqlite3
 import pytest
 
 from tasker import queries
-from tasker.database import transaction
+from tasker.database import get_db
 from tasker.models import Priority, RelationType, Status
 
 
@@ -82,7 +82,7 @@ def test_clean_completed_filters_by_age():
     old = queries.create_task(project.id, "Old", status=Status.DONE)
 
     queries.update_task(old.id, status=Status.DONE)
-    conn = queries.get_connection()
+    conn = get_db().connect()
     conn.execute(
         "UPDATE tasks SET completed_at = datetime('now', '-10 days') WHERE id = ?",
         (old.id,),
@@ -124,7 +124,7 @@ def test_group_id_update_and_clear():
     updated = queries.update_task(task.id, group_id="backend")
     assert updated.group_id == "backend"
 
-    cleared = queries.update_task(task.id, group_id=None)
+    cleared = queries.update_task(task.id, clear_group=True)
     assert cleared.group_id is None
 
 
@@ -373,8 +373,7 @@ def test_notes_cascade_delete():
     queries.delete_task(task.id)
     assert queries.get_task(task.id) is None
     # Notes should be gone (cascade), confirmed by direct query
-    from tasker.database import get_connection
-    conn = get_connection()
+    conn = get_db().connect()
     row = conn.execute("SELECT COUNT(*) as c FROM task_notes WHERE task_id = ?", (task.id,)).fetchone()
     assert row["c"] == 0
 
@@ -468,15 +467,14 @@ def test_reviews_cascade_delete():
     queries.create_review_stub(task.id)
 
     queries.delete_task(task.id)
-    from tasker.database import get_connection
-    conn = get_connection()
+    conn = get_db().connect()
     row = conn.execute("SELECT COUNT(*) as c FROM task_reviews WHERE task_id = ?", (task.id,)).fetchone()
     assert row["c"] == 0
 
 
 def test_check_constraints_enforced():
     project = queries.create_project("/tmp/projectG", "Project G")
-    with transaction() as conn:
+    with get_db().transaction() as conn:
         with pytest.raises(sqlite3.IntegrityError):
             conn.execute(
                 "INSERT INTO tasks(project_id, title, status, priority) VALUES (?, ?, ?, ?)",
@@ -487,3 +485,64 @@ def test_check_constraints_enforced():
                 "INSERT INTO tasks(project_id, title, status, priority) VALUES (?, ?, ?, ?)",
                 (project.id, "Bad priority", "todo", 9),
             )
+
+
+# History tests
+
+
+def test_history_recorded_on_status_change():
+    project = queries.create_project("/tmp/histH1", "Hist H1")
+    task = queries.create_task(project.id, "History task")
+
+    queries.start_task(task.id, agent="claude-sonnet-4-6")
+    queries.complete_task(task.id, agent="jason")
+
+    history = queries.get_task_history(task.id)
+    assert len(history) == 2
+
+    assert history[0].agent == "claude-sonnet-4-6"
+    assert history[0].field == "status"
+    assert history[0].old_value == "todo"
+    assert history[0].new_value == "in-progress"
+
+    assert history[1].agent == "jason"
+    assert history[1].field == "status"
+    assert history[1].old_value == "in-progress"
+    assert history[1].new_value == "done"
+
+
+def test_history_not_recorded_without_agent():
+    project = queries.create_project("/tmp/histH2", "Hist H2")
+    task = queries.create_task(project.id, "No agent task")
+
+    queries.start_task(task.id)  # no agent
+    history = queries.get_task_history(task.id)
+    assert history == []
+
+
+def test_history_cascade_delete():
+    project = queries.create_project("/tmp/histH3", "Hist H3")
+    task = queries.create_task(project.id, "Task with history")
+    queries.start_task(task.id, agent="bot")
+
+    queries.delete_task(task.id)
+    conn = get_db().connect()
+    row = conn.execute(
+        "SELECT COUNT(*) as c FROM task_history WHERE task_id = ?", (task.id,)
+    ).fetchone()
+    assert row["c"] == 0
+
+
+def test_history_entry_to_dict():
+    project = queries.create_project("/tmp/histH4", "Hist H4")
+    task = queries.create_task(project.id, "Dict task")
+    queries.review_task(task.id, agent="reviewer")
+
+    history = queries.get_task_history(task.id)
+    assert len(history) == 1
+    d = history[0].to_dict()
+    assert d["agent"] == "reviewer"
+    assert d["field"] == "status"
+    assert d["old_value"] == "todo"
+    assert d["new_value"] == "review"
+    assert "changed_at" in d

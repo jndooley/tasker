@@ -6,8 +6,8 @@ import json
 import sqlite3
 from typing import Dict, List, Optional, Sequence
 
-from .database import get_connection, transaction
-from .models import INVERSE_LABELS, CodeReview, Note, Priority, Project, RelationType, Status, Task, TaskRelation
+from .database import get_db
+from .models import INVERSE_LABELS, CodeReview, HistoryEntry, Note, Priority, Project, RelationType, Status, Task, TaskRelation
 from .utils import days_ago, now_iso
 
 ORDER_STEP = 1000
@@ -18,7 +18,7 @@ ORDER_STEP = 1000
 
 def create_project(path: str, name: str, activate: bool = True) -> Project:
     """Create a project if missing and optionally mark it active."""
-    with transaction() as conn:
+    with get_db().transaction() as conn:
         cur = conn.execute(
             "INSERT OR IGNORE INTO projects(path, name, is_active) VALUES (?, ?, 0)",
             (path, name),
@@ -40,21 +40,21 @@ def create_project(path: str, name: str, activate: bool = True) -> Project:
 
 def get_project(project_id: int) -> Optional[Project]:
     """Fetch a project by id."""
-    conn = get_connection()
+    conn = get_db().connect()
     row = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
     return Project.from_row(row) if row else None
 
 
 def get_project_by_path(path: str) -> Optional[Project]:
     """Fetch a project by filesystem path."""
-    conn = get_connection()
+    conn = get_db().connect()
     row = conn.execute("SELECT * FROM projects WHERE path = ?", (path,)).fetchone()
     return Project.from_row(row) if row else None
 
 
 def list_projects() -> List[Project]:
     """List all projects sorted by creation date."""
-    conn = get_connection()
+    conn = get_db().connect()
     rows = conn.execute("SELECT * FROM projects ORDER BY created_at ASC").fetchall()
     return [Project.from_row(r) for r in rows]
 
@@ -64,7 +64,7 @@ def set_active_project(path: str) -> Optional[Project]:
     project = get_project_by_path(path)
     if project is None:
         return None
-    with transaction() as conn:
+    with get_db().transaction() as conn:
         conn.execute("UPDATE projects SET is_active = 0")
         conn.execute(
             "UPDATE projects SET is_active = 1, updated_at = CURRENT_TIMESTAMP WHERE path = ?",
@@ -75,7 +75,7 @@ def set_active_project(path: str) -> Optional[Project]:
 
 def get_active_project() -> Optional[Project]:
     """Return the currently active project if any."""
-    conn = get_connection()
+    conn = get_db().connect()
     row = conn.execute("SELECT * FROM projects WHERE is_active = 1 LIMIT 1").fetchone()
     return Project.from_row(row) if row else None
 
@@ -112,7 +112,7 @@ def create_task(
     plan: Optional[str] = None,
 ) -> Task:
     """Insert a task with optional status/priority, ordering, and group."""
-    with transaction() as conn:
+    with get_db().transaction() as conn:
         idx = (
             order_index
             if order_index is not None
@@ -153,7 +153,7 @@ def create_task(
 
 def get_task(task_id: int) -> Optional[Task]:
     """Fetch a task by id."""
-    conn = get_connection()
+    conn = get_db().connect()
     row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
     return Task.from_row(row) if row else None
 
@@ -166,7 +166,7 @@ def list_tasks(
     group_id: Optional[str] = None,
 ) -> List[Task]:
     """List tasks for a project with optional filters and ordering."""
-    conn = get_connection()
+    conn = get_db().connect()
     conditions = ["project_id = ?"]
     params: List = [project_id]
 
@@ -193,9 +193,6 @@ def list_tasks(
     return [Task.from_row(r) for r in rows]
 
 
-_UNSET = object()
-
-
 def update_task(
     task_id: int,
     title: Optional[str] = None,
@@ -203,10 +200,20 @@ def update_task(
     acceptance_criteria: Optional[Sequence[str]] = None,
     priority: Optional[Priority] = None,
     status: Optional[Status] = None,
-    group_id: object = _UNSET,
+    group_id: Optional[str] = None,
+    clear_group: bool = False,
     plan: Optional[str] = None,
+    agent: Optional[str] = None,
 ) -> Optional[Task]:
-    """Update mutable task fields; returns updated task or None."""
+    """Update mutable task fields; returns updated task or None.
+
+    Pass ``clear_group=True`` to set group_id to NULL.  Passing a non-None
+    ``group_id`` sets it to that value.  Leaving both at defaults leaves the
+    field untouched.
+
+    When ``agent`` is provided and ``status`` is changing, a history entry is
+    recorded inside the same transaction.
+    """
     sets = []
     params: List = []
     if title is not None:
@@ -229,7 +236,10 @@ def update_task(
             params.append(now_iso())
         else:
             sets.append("completed_at = NULL")
-    if group_id is not _UNSET:
+    if clear_group:
+        sets.append("group_id = ?")
+        params.append(None)
+    elif group_id is not None:
         sets.append("group_id = ?")
         params.append(group_id)
     if plan is not None:
@@ -241,17 +251,28 @@ def update_task(
     sets.append("updated_at = CURRENT_TIMESTAMP")
     params.append(task_id)
 
-    with transaction() as conn:
+    with get_db().transaction() as conn:
+        old_status_val: Optional[str] = None
+        if status is not None and agent is not None:
+            old_row = conn.execute(
+                "SELECT status FROM tasks WHERE id = ?", (task_id,)
+            ).fetchone()
+            old_status_val = old_row["status"] if old_row else None
+
         conn.execute(
             f"UPDATE tasks SET {', '.join(sets)} WHERE id = ?",
             params,
         )
+
+        if status is not None and agent is not None and old_status_val is not None:
+            record_history(conn, task_id, agent, "status", old_status_val, status.value)
+
         return get_task(task_id)
 
 
 def delete_task(task_id: int) -> None:
     """Delete a task by id."""
-    with transaction() as conn:
+    with get_db().transaction() as conn:
         conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
 
 
@@ -261,7 +282,7 @@ def reorder_task(task_id: int, position: int) -> Optional[Task]:
     if not task:
         return None
 
-    with transaction() as conn:
+    with get_db().transaction() as conn:
         rows = conn.execute(
             "SELECT id FROM tasks WHERE project_id = ? ORDER BY order_index ASC",
             (task.project_id,),
@@ -284,30 +305,30 @@ def reorder_task(task_id: int, position: int) -> Optional[Task]:
         return get_task(task_id)
 
 
-def start_task(task_id: int) -> Optional[Task]:
+def start_task(task_id: int, agent: Optional[str] = None) -> Optional[Task]:
     """Set task status to in-progress."""
-    return update_task(task_id, status=Status.IN_PROGRESS)
+    return update_task(task_id, status=Status.IN_PROGRESS, agent=agent)
 
 
-def complete_task(task_id: int) -> Optional[Task]:
+def complete_task(task_id: int, agent: Optional[str] = None) -> Optional[Task]:
     """Set task status to done and mark completion time."""
-    return update_task(task_id, status=Status.DONE)
+    return update_task(task_id, status=Status.DONE, agent=agent)
 
 
-def review_task(task_id: int) -> Optional[Task]:
+def review_task(task_id: int, agent: Optional[str] = None) -> Optional[Task]:
     """Set task status to review and auto-create CR-1 stub on first call."""
-    updated = update_task(task_id, status=Status.REVIEW)
+    updated = update_task(task_id, status=Status.REVIEW, agent=agent)
     if updated and not task_has_reviews(task_id):
         create_review_stub(task_id)
     return updated
 
 
-def qa_task(task_id: int) -> Optional[Task]:
+def qa_task(task_id: int, agent: Optional[str] = None) -> Optional[Task]:
     """Set task status to qa."""
-    return update_task(task_id, status=Status.QA)
+    return update_task(task_id, status=Status.QA, agent=agent)
 
 
-def block_task(task_id: int, blocker_id: int) -> Task:
+def block_task(task_id: int, blocker_id: int, agent: Optional[str] = None) -> Task:
     """Set task to blocked status and create a blocked-by relation to the blocker."""
     task = get_task(task_id)
     if task is None:
@@ -320,10 +341,10 @@ def block_task(task_id: int, blocker_id: int) -> Task:
     if task_id == blocker_id:
         raise ValueError("A task cannot block itself.")
 
-    updated = update_task(task_id, status=Status.BLOCKED)
+    updated = update_task(task_id, status=Status.BLOCKED, agent=agent)
 
     # Add blocked-by relation if not already present
-    conn = get_connection()
+    conn = get_db().connect()
     existing = conn.execute(
         "SELECT 1 FROM task_relations WHERE source_task_id = ? AND target_task_id = ? AND relation_type = ?",
         (task_id, blocker_id, RelationType.BLOCKED_BY.value),
@@ -336,7 +357,7 @@ def block_task(task_id: int, blocker_id: int) -> Task:
 
 def get_focus_task(project_id: int) -> Optional[Task]:
     """Return the next task to focus on, skipping blocked tasks."""
-    conn = get_connection()
+    conn = get_db().connect()
     row = conn.execute(
         """
         SELECT * FROM tasks t
@@ -363,7 +384,7 @@ def get_focus_task(project_id: int) -> Optional[Task]:
 
 def get_project_stats(project_id: int) -> dict:
     """Return basic counts of tasks by status for a project."""
-    conn = get_connection()
+    conn = get_db().connect()
     row = conn.execute(
         """
         SELECT
@@ -383,7 +404,7 @@ def get_project_stats(project_id: int) -> dict:
 
 def clean_completed(project_id: int, older_than_days: Optional[int] = None) -> int:
     """Delete completed tasks; optionally only those older than N days."""
-    with transaction() as conn:
+    with get_db().transaction() as conn:
         if older_than_days is None:
             cur = conn.execute(
                 "DELETE FROM tasks WHERE project_id = ? AND status = 'done'",
@@ -400,7 +421,7 @@ def clean_completed(project_id: int, older_than_days: Optional[int] = None) -> i
 
 def list_groups(project_id: int, include_done: bool = False) -> List[dict]:
     """List distinct groups for a project with task counts."""
-    conn = get_connection()
+    conn = get_db().connect()
     done_filter = "" if include_done else "AND status != 'done'"
     rows = conn.execute(
         f"""
@@ -438,7 +459,7 @@ def add_relation(
         raise ValueError(f"Task {target_task_id} not found.")
     if source.project_id != target.project_id:
         raise ValueError("Tasks must belong to the same project.")
-    with transaction() as conn:
+    with get_db().transaction() as conn:
         cur = conn.execute(
             "INSERT INTO task_relations(source_task_id, target_task_id, relation_type) VALUES (?, ?, ?)",
             (source_task_id, target_task_id, relation_type.value),
@@ -453,7 +474,7 @@ def remove_relation(
     source_task_id: int, target_task_id: int, relation_type: RelationType
 ) -> bool:
     """Remove a specific relation. Returns True if a row was deleted."""
-    with transaction() as conn:
+    with get_db().transaction() as conn:
         cur = conn.execute(
             "DELETE FROM task_relations WHERE source_task_id = ? AND target_task_id = ? AND relation_type = ?",
             (source_task_id, target_task_id, relation_type.value),
@@ -466,7 +487,7 @@ def get_relations(task_id: int) -> List[dict]:
 
     Each dict has: relation_id, task_id (the other task), label (e.g. 'blocked-by' or 'blocks').
     """
-    conn = get_connection()
+    conn = get_db().connect()
     results = []
 
     # Relations where this task is the source (label = relation_type value)
@@ -498,7 +519,7 @@ def get_relations(task_id: int) -> List[dict]:
 
 def is_blocked(task_id: int) -> bool:
     """Return True if the task has a blocked-by relation pointing to an incomplete task."""
-    conn = get_connection()
+    conn = get_db().connect()
     row = conn.execute(
         """
         SELECT 1 FROM task_relations tr
@@ -518,7 +539,7 @@ def is_blocked(task_id: int) -> bool:
 
 def add_note(task_id: int, author: str, content: str) -> Note:
     """Append an immutable note to a task."""
-    with transaction() as conn:
+    with get_db().transaction() as conn:
         cur = conn.execute(
             "INSERT INTO task_notes(task_id, author, content) VALUES (?, ?, ?)",
             (task_id, author, content),
@@ -531,7 +552,7 @@ def add_note(task_id: int, author: str, content: str) -> Note:
 
 def get_notes(task_id: int) -> List[Note]:
     """Return all notes for a task, ordered by creation time."""
-    conn = get_connection()
+    conn = get_db().connect()
     rows = conn.execute(
         "SELECT * FROM task_notes WHERE task_id = ? ORDER BY created_at ASC",
         (task_id,),
@@ -544,7 +565,7 @@ def get_notes(task_id: int) -> List[Note]:
 
 def task_has_reviews(task_id: int) -> bool:
     """Return True if the task has at least one code review."""
-    conn = get_connection()
+    conn = get_db().connect()
     row = conn.execute(
         "SELECT 1 FROM task_reviews WHERE task_id = ? LIMIT 1", (task_id,)
     ).fetchone()
@@ -553,7 +574,7 @@ def task_has_reviews(task_id: int) -> bool:
 
 def create_review_stub(task_id: int) -> CodeReview:
     """Create a new CR stub with auto-incremented cr_num (within a transaction)."""
-    with transaction() as conn:
+    with get_db().transaction() as conn:
         row = conn.execute(
             "SELECT COALESCE(MAX(cr_num), 0) + 1 AS next_num FROM task_reviews WHERE task_id = ?",
             (task_id,),
@@ -571,7 +592,7 @@ def create_review_stub(task_id: int) -> CodeReview:
 
 def get_reviews(task_id: int) -> List[CodeReview]:
     """Return all code reviews for a task ordered by cr_num."""
-    conn = get_connection()
+    conn = get_db().connect()
     rows = conn.execute(
         "SELECT * FROM task_reviews WHERE task_id = ? ORDER BY cr_num ASC",
         (task_id,),
@@ -581,7 +602,7 @@ def get_reviews(task_id: int) -> List[CodeReview]:
 
 def get_review(task_id: int, cr_num: int) -> Optional[CodeReview]:
     """Fetch a single code review by task_id and cr_num."""
-    conn = get_connection()
+    conn = get_db().connect()
     row = conn.execute(
         "SELECT * FROM task_reviews WHERE task_id = ? AND cr_num = ?",
         (task_id, cr_num),
@@ -602,7 +623,7 @@ def update_review(task_id: int, cr_num: int, **fields) -> Optional[CodeReview]:
         return get_review(task_id, cr_num)
     sets.append("updated_at = CURRENT_TIMESTAMP")
     params.extend([task_id, cr_num])
-    with transaction() as conn:
+    with get_db().transaction() as conn:
         conn.execute(
             f"UPDATE task_reviews SET {', '.join(sets)} WHERE task_id = ? AND cr_num = ?",
             params,
@@ -612,7 +633,7 @@ def update_review(task_id: int, cr_num: int, **fields) -> Optional[CodeReview]:
 
 def delete_review(task_id: int, cr_num: int) -> bool:
     """Delete a code review. Returns True if a row was deleted."""
-    with transaction() as conn:
+    with get_db().transaction() as conn:
         cur = conn.execute(
             "DELETE FROM task_reviews WHERE task_id = ? AND cr_num = ?",
             (task_id, cr_num),
@@ -620,49 +641,29 @@ def delete_review(task_id: int, cr_num: int) -> bool:
         return cur.rowcount > 0
 
 
-def export_tasks_markdown(project: Project, tasks: List[Task], include_notes: bool = False) -> str:
-    """Render tasks as a Markdown document grouped by status."""
-    lines = [f"# Tasks for {project.name}", ""]
-    by_status: Dict[Status, List[Task]] = {Status.TODO: [], Status.IN_PROGRESS: [], Status.REVIEW: [], Status.QA: [], Status.BLOCKED: [], Status.DONE: []}
-    for t in tasks:
-        by_status[t.status].append(t)
-    for status, title in [
-        (Status.IN_PROGRESS, "In Progress"),
-        (Status.REVIEW, "Review"),
-        (Status.QA, "QA"),
-        (Status.BLOCKED, "Blocked"),
-        (Status.TODO, "Todo"),
-        (Status.DONE, "Done"),
-    ]:
-        lines.append(f"## {title}")
-        if not by_status[status]:
-            lines.append("(none)\n")
-            continue
-        for t in by_status[status]:
-            pr = ["", "(low)", "(medium)", "(high)"][int(t.priority)]
-            grp = f" [{t.group_id}]" if t.group_id else ""
-            lines.append(
-                f"- [ {'x' if status == Status.DONE else ' '} ] {t.title} {pr}{grp}\n  {t.description or ''}"
-            )
-            if include_notes:
-                notes = get_notes(t.id)
-                if notes:
-                    lines.append("  **Notes:**")
-                    for n in notes:
-                        ts = n.created_at.strftime("%Y-%m-%d %H:%M")
-                        lines.append(f"  - [{ts}] {n.author}: {n.content}")
-                reviews = get_reviews(t.id)
-                if reviews:
-                    lines.append("  **Code Reviews:**")
-                    for cr in reviews:
-                        ts = cr.created_at.strftime("%Y-%m-%d %H:%M")
-                        reviewer_str = f" — Reviewer: {cr.reviewer}" if cr.reviewer else ""
-                        lines.append(f"  - CR-{cr.cr_num} ({ts}{reviewer_str})")
-                        if cr.recommendations:
-                            lines.append(f"    - Recommendations: {cr.recommendations}")
-                        if cr.devils_advocate:
-                            lines.append(f"    - Devil's Advocate: {cr.devils_advocate}")
-                        if cr.false_positives:
-                            lines.append(f"    - False Positives: {cr.false_positives}")
-        lines.append("")
-    return "\n".join(lines)
+# History operations
+
+
+def record_history(
+    conn: "sqlite3.Connection",
+    task_id: int,
+    agent: str,
+    field: str,
+    old_value: Optional[str],
+    new_value: Optional[str],
+) -> None:
+    """Insert a history entry inside an existing transaction."""
+    conn.execute(
+        "INSERT INTO task_history(task_id, agent, field, old_value, new_value, changed_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (task_id, agent, field, old_value, new_value, now_iso()),
+    )
+
+
+def get_task_history(task_id: int) -> List[HistoryEntry]:
+    """Return all history entries for a task, ordered by changed_at."""
+    conn = get_db().connect()
+    rows = conn.execute(
+        "SELECT * FROM task_history WHERE task_id = ? ORDER BY changed_at ASC",
+        (task_id,),
+    ).fetchall()
+    return [HistoryEntry.from_row(r) for r in rows]

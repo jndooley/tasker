@@ -11,7 +11,7 @@ from .utils import resolve_db_path
 class Database:
     """SQLite database singleton wrapper with schema migrations and transactions."""
 
-    SCHEMA_VERSION = 8
+    SCHEMA_VERSION = 9
 
     def __init__(self, db_path: Optional[Path] = None):
         self._db_path = db_path or resolve_db_path()
@@ -251,6 +251,20 @@ class Database:
                 );
             """)
 
+        if current < 9:
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS task_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                    agent TEXT NOT NULL,
+                    field TEXT NOT NULL,
+                    old_value TEXT,
+                    new_value TEXT,
+                    changed_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_task_history_task_id ON task_history(task_id);
+            """)
+
         if current < self.SCHEMA_VERSION:
             self._set_version(self.SCHEMA_VERSION)
 
@@ -264,16 +278,6 @@ def get_db(db_path: Optional[Path] = None) -> Database:
     if _db_instance is None:
         _db_instance = Database(db_path)
     return _db_instance
-
-
-def get_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
-    """Convenience accessor for the shared connection."""
-    return get_db(db_path).connect()
-
-
-def transaction(db_path: Optional[Path] = None):
-    """Convenience transaction context manager."""
-    return get_db(db_path).transaction()
 
 
 def close_connection():

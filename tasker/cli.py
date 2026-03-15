@@ -1,6 +1,7 @@
 """Click CLI definition for Tasker."""
 
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Optional, Tuple
@@ -10,6 +11,8 @@ import click
 from . import __version__
 from .formatter import (
     console,
+    export_tasks_markdown,
+    format_history,
     format_notes,
     format_reviews,
     print_focus,
@@ -33,7 +36,6 @@ from .queries import (
     delete_review,
     delete_task,
     export_tasks,
-    export_tasks_markdown,
     get_active_project,
     get_focus_task,
     get_notes,
@@ -43,6 +45,7 @@ from .queries import (
     get_review,
     get_reviews,
     get_task,
+    get_task_history,
     is_blocked,
     list_groups,
     list_projects,
@@ -99,6 +102,23 @@ def _require_project():
         click.echo("No active project. Run `tasker init` first.")
         raise click.Abort()
     return project
+
+
+def _require_task(task_id: int):
+    """Fetch task in the active project, aborting if not found."""
+    project = _require_project()
+    task = get_task(task_id)
+    if not task or task.project_id != project.id:
+        console.print(f"Task {task_id} not found in active project.")
+        raise click.Abort()
+    return task
+
+
+def _get_agent(agent: Optional[str]) -> str:
+    """Resolve agent name: explicit arg → $TASKER_AGENT env → 'unknown'."""
+    if agent:
+        return agent
+    return os.environ.get("TASKER_AGENT", "unknown")
 
 
 def _parse_acceptance_criteria(
@@ -275,13 +295,10 @@ def list_cmd(
 @cli.command()
 @click.argument("task_id", type=int)
 @click.option("--notes", "show_notes", is_flag=True, help="Also show notes and code reviews")
-def show(task_id: int, show_notes: bool):
+@click.option("--history", "show_history", is_flag=True, help="Show history log")
+def show(task_id: int, show_notes: bool, show_history: bool):
     """Show task details."""
-    project = _require_project()
-    task = get_task(task_id)
-    if not task or task.project_id != project.id:
-        console.print(f"Task {task_id} not found in active project.")
-        return
+    task = _require_task(task_id)
     relations = get_relations(task_id)
     print_task_detail(task, relations=relations)
     if show_notes:
@@ -289,6 +306,9 @@ def show(task_id: int, show_notes: bool):
         format_notes(get_notes(task_id))
         console.print()
         format_reviews(get_reviews(task_id))
+    if show_history:
+        console.print()
+        format_history(get_task_history(task_id))
 
 
 @cli.command()
@@ -309,6 +329,7 @@ def show(task_id: int, show_notes: bool):
 @click.option("--status", "-s", type=click.Choice(STATUS_CHOICES))
 @click.option("--group", "-g", "group_id", help="Group ID (use '' to clear)")
 @click.option("--plan", help="Implementation plan (use '-' to read from stdin)")
+@click.option("--agent", default=None, help="Agent or user performing this action")
 def update(
     task_id: int,
     title: Optional[str],
@@ -319,24 +340,23 @@ def update(
     status: Optional[str],
     group_id: Optional[str],
     plan: Optional[str],
+    agent: Optional[str],
 ):
     """Update a task."""
-    project = _require_project()
-    task = get_task(task_id)
-    if not task or task.project_id != project.id:
-        console.print(f"Task {task_id} not found in active project.")
-        return
+    task = _require_task(task_id)
     acceptance_criteria_value = _parse_acceptance_criteria(
         acceptance_criteria, acceptance_criteria_json
     )
     if plan == "-":
         plan = sys.stdin.read()
-    # Convert empty string to None to clear group assignment
-    from .queries import _UNSET
-
-    group_val = _UNSET
+    clear_group = False
+    new_group_id = None
     if group_id is not None:
-        group_val = group_id if group_id != "" else None
+        if group_id == "":
+            clear_group = True
+        else:
+            new_group_id = group_id
+    status_agent = _get_agent(agent) if status else None
     updated = update_task(
         task_id,
         title=title,
@@ -344,8 +364,10 @@ def update(
         acceptance_criteria=acceptance_criteria_value,
         priority=_parse_priority(priority),
         status=_parse_status(status),
-        group_id=group_val,
+        group_id=new_group_id,
+        clear_group=clear_group,
         plan=plan,
+        agent=status_agent,
     )
     if updated:
         console.print(f"Updated task #{updated.id}")
@@ -353,30 +375,24 @@ def update(
 
 @cli.command()
 @click.argument("task_id", type=int)
-def start(task_id: int):
+@click.option("--agent", default=None, help="Agent or user performing this action")
+def start(task_id: int, agent: Optional[str]):
     """Mark a task as in-progress."""
-    project = _require_project()
-    task = get_task(task_id)
-    if not task or task.project_id != project.id:
-        console.print(f"Task {task_id} not found in active project.")
-        return
-    updated = start_task(task_id)
+    _require_task(task_id)
+    updated = start_task(task_id, agent=_get_agent(agent))
     if updated:
         console.print(f"Task #{task_id} started")
 
 
 @cli.command()
 @click.argument("task_id", type=int)
-def review(task_id: int):
+@click.option("--agent", default=None, help="Agent or user performing this action")
+def review(task_id: int, agent: Optional[str]):
     """Mark a task as in review."""
-    project = _require_project()
-    task = get_task(task_id)
-    if not task or task.project_id != project.id:
-        console.print(f"Task {task_id} not found in active project.")
-        return
+    _require_task(task_id)
     from .queries import task_has_reviews
     had_reviews = task_has_reviews(task_id)
-    updated = review_task(task_id)
+    updated = review_task(task_id, agent=_get_agent(agent))
     if updated:
         console.print(f"Task #{task_id} in review")
         if not had_reviews:
@@ -385,28 +401,22 @@ def review(task_id: int):
 
 @cli.command()
 @click.argument("task_id", type=int)
-def qa(task_id: int):
+@click.option("--agent", default=None, help="Agent or user performing this action")
+def qa(task_id: int, agent: Optional[str]):
     """Mark a task as in QA."""
-    project = _require_project()
-    task = get_task(task_id)
-    if not task or task.project_id != project.id:
-        console.print(f"Task {task_id} not found in active project.")
-        return
-    updated = qa_task(task_id)
+    _require_task(task_id)
+    updated = qa_task(task_id, agent=_get_agent(agent))
     if updated:
         console.print(f"Task #{task_id} in QA")
 
 
 @cli.command()
 @click.argument("task_id", type=int)
-def done(task_id: int):
+@click.option("--agent", default=None, help="Agent or user performing this action")
+def done(task_id: int, agent: Optional[str]):
     """Mark a task as done."""
-    project = _require_project()
-    task = get_task(task_id)
-    if not task or task.project_id != project.id:
-        console.print(f"Task {task_id} not found in active project.")
-        return
-    updated = complete_task(task_id)
+    _require_task(task_id)
+    updated = complete_task(task_id, agent=_get_agent(agent))
     if updated:
         console.print(f"Task #{task_id} completed")
 
@@ -414,19 +424,13 @@ def done(task_id: int):
 @cli.command()
 @click.argument("task_id", type=int)
 @click.argument("blocker_id", type=int)
-def block(task_id: int, blocker_id: int):
+@click.option("--agent", default=None, help="Agent or user performing this action")
+def block(task_id: int, blocker_id: int, agent: Optional[str]):
     """Mark a task as blocked by another task."""
-    project = _require_project()
-    task = get_task(task_id)
-    if not task or task.project_id != project.id:
-        console.print(f"Task {task_id} not found in active project.")
-        return
-    blocker = get_task(blocker_id)
-    if not blocker or blocker.project_id != project.id:
-        console.print(f"Task {blocker_id} not found in active project.")
-        return
+    _require_task(task_id)
+    _require_task(blocker_id)
     try:
-        block_task(task_id, blocker_id)
+        block_task(task_id, blocker_id, agent=_get_agent(agent))
         console.print(f"Task #{task_id} blocked by #{blocker_id}")
     except ValueError as exc:
         console.print(f"Error: {exc}")
@@ -437,11 +441,7 @@ def block(task_id: int, blocker_id: int):
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
 def delete(task_id: int, yes: bool):
     """Delete a task."""
-    project = _require_project()
-    task = get_task(task_id)
-    if not task or task.project_id != project.id:
-        console.print(f"Task {task_id} not found in active project.")
-        return
+    _require_task(task_id)
     if not yes and not click.confirm(f"Delete task #{task_id}?"):
         return
     delete_task(task_id)
@@ -453,11 +453,7 @@ def delete(task_id: int, yes: bool):
 @click.argument("position", type=int)
 def reorder(task_id: int, position: int):
     """Move a task to POSITION (1-based)."""
-    project = _require_project()
-    task = get_task(task_id)
-    if not task or task.project_id != project.id:
-        console.print(f"Task {task_id} not found in active project.")
-        return
+    _require_task(task_id)
     updated = reorder_task(task_id, position)
     if updated:
         console.print(f"Task #{task_id} moved to position {position}")
@@ -535,11 +531,7 @@ def unlink(source_id: int, target_id: int, relation_type: str):
 @click.option("--author", "-a", required=True, help="Note author (required)")
 def note(task_id: int, content: str, author: str):
     """Append a note to a task."""
-    project = _require_project()
-    task = get_task(task_id)
-    if not task or task.project_id != project.id:
-        console.print(f"Task {task_id} not found in active project.")
-        return
+    _require_task(task_id)
     if not author.strip():
         raise click.BadParameter("Author cannot be empty.", param_hint="'--author'")
     n = add_note(task_id, author.strip(), content)
@@ -558,11 +550,7 @@ def cr():
 @click.argument("task_id", type=int)
 def cr_list(task_id: int):
     """List all code reviews for a task."""
-    project = _require_project()
-    task = get_task(task_id)
-    if not task or task.project_id != project.id:
-        console.print(f"Task {task_id} not found in active project.")
-        return
+    _require_task(task_id)
     reviews = get_reviews(task_id)
     if not reviews:
         console.print("No code reviews found.")
@@ -589,11 +577,7 @@ def cr_list(task_id: int):
 @click.argument("cr_num", type=int)
 def cr_show(task_id: int, cr_num: int):
     """Show full detail of one code review."""
-    project = _require_project()
-    task = get_task(task_id)
-    if not task or task.project_id != project.id:
-        console.print(f"Task {task_id} not found in active project.")
-        return
+    _require_task(task_id)
     cr_obj = get_review(task_id, cr_num)
     if not cr_obj:
         console.print(f"CR-{cr_num} not found for task #{task_id}.")
@@ -605,11 +589,7 @@ def cr_show(task_id: int, cr_num: int):
 @click.argument("task_id", type=int)
 def cr_add(task_id: int):
     """Create a new code review stub for a task."""
-    project = _require_project()
-    task = get_task(task_id)
-    if not task or task.project_id != project.id:
-        console.print(f"Task {task_id} not found in active project.")
-        return
+    _require_task(task_id)
     cr_obj = create_review_stub(task_id)
     console.print(f"Created CR-{cr_obj.cr_num} for task #{task_id}.")
     console.print(f"Use 'tasker cr update {task_id} {cr_obj.cr_num}' to fill in details.")
@@ -624,11 +604,7 @@ def cr_add(task_id: int):
 @click.option("--false-positives", "-f", "false_positives", help="Issues raised but ruled out (or - for stdin)")
 def cr_update(task_id: int, cr_num: int, reviewer: Optional[str], recommendations: Optional[str], devils_advocate: Optional[str], false_positives: Optional[str]):
     """Update fields of a code review."""
-    project = _require_project()
-    task = get_task(task_id)
-    if not task or task.project_id != project.id:
-        console.print(f"Task {task_id} not found in active project.")
-        return
+    _require_task(task_id)
     cr_obj = get_review(task_id, cr_num)
     if not cr_obj:
         console.print(f"CR-{cr_num} not found for task #{task_id}.")
@@ -650,11 +626,7 @@ def cr_update(task_id: int, cr_num: int, reviewer: Optional[str], recommendation
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
 def cr_delete(task_id: int, cr_num: int, yes: bool):
     """Delete a code review."""
-    project = _require_project()
-    task = get_task(task_id)
-    if not task or task.project_id != project.id:
-        console.print(f"Task {task_id} not found in active project.")
-        return
+    _require_task(task_id)
     if not yes and not click.confirm(f"Delete CR-{cr_num} for task {task_id}?"):
         return
     deleted = delete_review(task_id, cr_num)
@@ -707,7 +679,8 @@ def clean(days: Optional[int], yes: bool):
     "--format", "-f", "fmt", type=click.Choice(["json", "md"]), default="json"
 )
 @click.option("--include-notes", "include_notes", is_flag=True, help="Include notes and code reviews in export")
-def export(file: Optional[Path], fmt: str, include_notes: bool):
+@click.option("--include-history", "include_history", is_flag=True, help="Include history log in export")
+def export(file: Optional[Path], fmt: str, include_notes: bool, include_history: bool):
     """Export tasks to FILE (default stdout)."""
     project = _require_project()
     tasks = list_tasks(project.id, include_done=True)
@@ -717,9 +690,14 @@ def export(file: Optional[Path], fmt: str, include_notes: bool):
             for td in task_dicts:
                 td["notes"] = [n.to_dict() for n in get_notes(td["id"])]
                 td["reviews"] = [r.to_dict() for r in get_reviews(td["id"])]
+        if include_history:
+            for td in task_dicts:
+                td["history"] = [h.to_dict() for h in get_task_history(td["id"])]
         payload = json.dumps(task_dicts, indent=2)
     else:
-        payload = export_tasks_markdown(project, tasks, include_notes=include_notes)
+        payload = export_tasks_markdown(
+            project, tasks, include_notes=include_notes, include_history=include_history
+        )
 
     if file:
         file.write_text(payload)
