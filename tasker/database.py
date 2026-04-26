@@ -11,7 +11,7 @@ from .utils import resolve_db_path
 class Database:
     """SQLite database singleton wrapper with schema migrations and transactions."""
 
-    SCHEMA_VERSION = 9
+    SCHEMA_VERSION = 10
 
     def __init__(self, db_path: Optional[Path] = None):
         self._db_path = db_path or resolve_db_path()
@@ -268,6 +268,21 @@ class Database:
                 );
                 CREATE INDEX IF NOT EXISTS idx_task_history_task_id ON task_history(task_id);
             """)
+
+        if current < 10:
+            columns = {
+                row["name"]
+                for row in conn.execute("PRAGMA table_info(tasks)").fetchall()
+            }
+            if "order_number" not in columns:
+                conn.execute("ALTER TABLE tasks ADD COLUMN order_number INTEGER")
+            if "order_set_at" not in columns:
+                conn.execute("ALTER TABLE tasks ADD COLUMN order_set_at TIMESTAMP")
+            if "order_set_by" not in columns:
+                conn.execute("ALTER TABLE tasks ADD COLUMN order_set_by TEXT")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_tasks_order_number ON tasks(order_number)"
+            )
 
         if current < self.SCHEMA_VERSION:
             self._set_version(self.SCHEMA_VERSION)

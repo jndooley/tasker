@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from .database import get_db
 from .models import INVERSE_LABELS, CodeReview, HistoryEntry, Note, Priority, Project, RelationType, Status, Task, TaskRelation
@@ -673,3 +673,112 @@ def get_task_history(task_id: int) -> List[HistoryEntry]:
         (task_id,),
     ).fetchall()
     return [HistoryEntry.from_row(r) for r in rows]
+
+
+# Recommended-order operations
+
+
+def set_task_order(
+    project_id: int,
+    sequence: Sequence[Sequence[int]],
+    agent: str,
+) -> int:
+    """Replace the recommended completion ordering for a project.
+
+    Each element of ``sequence`` is a step; tasks within the same step share
+    ``order_number`` (parallel/branching siblings). Tasks not present in the
+    sequence have their ordering cleared. History entries are written only
+    for tasks whose ``order_number`` actually changed.
+    """
+    seen: set = set()
+    flat: List[Tuple[int, int]] = []
+    for step_idx, step in enumerate(sequence, start=1):
+        for tid in step:
+            if not isinstance(tid, int) or isinstance(tid, bool):
+                raise ValueError(f"Task id must be int: {tid!r}")
+            if tid in seen:
+                raise ValueError(f"Task #{tid} appears in more than one step")
+            seen.add(tid)
+            flat.append((tid, step_idx))
+
+    with get_db().transaction() as conn:
+        if flat:
+            placeholders = ",".join("?" for _ in flat)
+            ids = [tid for tid, _ in flat]
+            rows = conn.execute(
+                f"SELECT id, project_id FROM tasks WHERE id IN ({placeholders})",
+                ids,
+            ).fetchall()
+            found = {r["id"]: r["project_id"] for r in rows}
+            for tid in ids:
+                if tid not in found:
+                    raise ValueError(f"Task #{tid} not found")
+                if found[tid] != project_id:
+                    raise ValueError(f"Task #{tid} not in active project")
+
+        old_rows = conn.execute(
+            "SELECT id, order_number FROM tasks WHERE project_id = ? AND order_number IS NOT NULL",
+            (project_id,),
+        ).fetchall()
+        old = {r["id"]: r["order_number"] for r in old_rows}
+
+        conn.execute(
+            "UPDATE tasks SET order_number = NULL, order_set_at = NULL, order_set_by = NULL WHERE project_id = ?",
+            (project_id,),
+        )
+
+        ts = now_iso()
+        changed = 0
+        for tid, step in flat:
+            conn.execute(
+                "UPDATE tasks SET order_number = ?, order_set_at = ?, order_set_by = ? WHERE id = ?",
+                (step, ts, agent, tid),
+            )
+            prev = old.get(tid)
+            if prev != step:
+                record_history(
+                    conn, tid, agent, "order_number",
+                    str(prev) if prev is not None else None,
+                    str(step),
+                )
+                changed += 1
+
+        for tid, prev in old.items():
+            if tid not in seen:
+                record_history(
+                    conn, tid, agent, "order_number", str(prev), None,
+                )
+                changed += 1
+
+        return changed
+
+
+def clear_task_order(project_id: int, agent: str) -> int:
+    """Clear ``order_number`` for every task in the project. Returns count cleared."""
+    with get_db().transaction() as conn:
+        old_rows = conn.execute(
+            "SELECT id, order_number FROM tasks WHERE project_id = ? AND order_number IS NOT NULL",
+            (project_id,),
+        ).fetchall()
+        for r in old_rows:
+            record_history(
+                conn, r["id"], agent, "order_number", str(r["order_number"]), None,
+            )
+        conn.execute(
+            "UPDATE tasks SET order_number = NULL, order_set_at = NULL, order_set_by = NULL WHERE project_id = ?",
+            (project_id,),
+        )
+        return len(old_rows)
+
+
+def get_task_order(project_id: int) -> List[List[int]]:
+    """Return current ranking as a list of steps; each step is a list of task ids."""
+    conn = get_db().connect()
+    rows = conn.execute(
+        "SELECT id, order_number FROM tasks WHERE project_id = ? AND order_number IS NOT NULL ORDER BY order_number ASC, id ASC",
+        (project_id,),
+    ).fetchall()
+    by_step: Dict[int, List[int]] = {}
+    for r in rows:
+        by_step.setdefault(r["order_number"], []).append(r["id"])
+    return [by_step[k] for k in sorted(by_step.keys())]

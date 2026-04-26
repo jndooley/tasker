@@ -141,6 +141,9 @@ class Task:
     created_at: datetime
     updated_at: datetime
     completed_at: Optional[datetime]
+    order_number: Optional[int] = None
+    order_set_at: Optional[datetime] = None
+    order_set_by: Optional[str] = None
 
     @classmethod
     def from_row(cls, row: "sqlite3.Row") -> "Task":
@@ -154,6 +157,7 @@ class Task:
                     acceptance_criteria = [str(item) for item in parsed]
             except json.JSONDecodeError:
                 acceptance_criteria = []
+        order_set_at_raw = row["order_set_at"]
         return cls(
             id=row["id"],
             project_id=row["project_id"],
@@ -170,6 +174,9 @@ class Task:
             completed_at=datetime.fromisoformat(row["completed_at"])
             if row["completed_at"]
             else None,
+            order_number=row["order_number"],
+            order_set_at=datetime.fromisoformat(order_set_at_raw) if order_set_at_raw else None,
+            order_set_by=row["order_set_by"],
         )
 
     def to_dict(self) -> dict:
@@ -190,6 +197,9 @@ class Task:
             "completed_at": self.completed_at.isoformat()
             if self.completed_at
             else None,
+            "order_number": self.order_number,
+            "order_set_at": self.order_set_at.isoformat() if self.order_set_at else None,
+            "order_set_by": self.order_set_by,
         }
 
 

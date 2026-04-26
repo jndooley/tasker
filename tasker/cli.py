@@ -29,6 +29,7 @@ from .queries import (
     add_relation,
     block_task,
     clean_completed,
+    clear_task_order,
     create_project,
     create_review_stub,
     create_task,
@@ -44,6 +45,7 @@ from .queries import (
     get_reviews,
     get_task,
     get_task_history,
+    get_task_order,
     is_blocked,
     list_groups,
     list_projects,
@@ -52,6 +54,7 @@ from .queries import (
     reorder_task,
     review_task,
     set_active_project,
+    set_task_order,
     task_has_reviews,
     update_review,
     update_task,
@@ -527,6 +530,88 @@ def unlink(source_id: int, target_id: int, relation_type: str):
         console.print(f"Removed {rt.value} link between #{source_id} and #{target_id}")
     else:
         console.print("No matching relation found.")
+
+
+# Order commands
+
+
+@cli.group()
+def order():
+    """Manage the recommended task completion order."""
+
+
+def _parse_order_steps(steps: Tuple[str, ...]) -> list:
+    """Parse positional step args like '1' '2,7,9' '5' into [[1],[2,7,9],[5]]."""
+    parsed: list = []
+    for step in steps:
+        ids: list = []
+        for token in step.split(","):
+            token = token.strip()
+            if not token:
+                continue
+            try:
+                ids.append(int(token))
+            except ValueError:
+                raise click.BadParameter(f"Invalid task id: {token!r}")
+        if not ids:
+            raise click.BadParameter(f"Empty step: {step!r}")
+        parsed.append(ids)
+    return parsed
+
+
+@order.command(name="set")
+@click.argument("steps", nargs=-1)
+@click.option("--json", "json_input", help="JSON array of arrays, e.g. '[[1],[2,7,9],[5]]'")
+@click.option("--agent", default=None, help="Agent or user performing this action")
+def order_set(steps: Tuple[str, ...], json_input: Optional[str], agent: Optional[str]):
+    """Set the recommended completion order. Use positional 'STEP STEP ...' (commas for parallel) or --json."""
+    project = _require_project()
+    if json_input is not None and steps:
+        raise click.BadParameter("Use either positional steps or --json, not both.")
+    if json_input is not None:
+        try:
+            sequence = json.loads(json_input)
+        except json.JSONDecodeError as exc:
+            raise click.BadParameter("--json must be a valid JSON array.") from exc
+        if not isinstance(sequence, list) or not all(
+            isinstance(step, list) and all(isinstance(t, int) for t in step)
+            for step in sequence
+        ):
+            raise click.BadParameter("--json must be an array of arrays of integers.")
+    elif steps:
+        sequence = _parse_order_steps(steps)
+    else:
+        raise click.BadParameter("Provide step arguments or --json.")
+    try:
+        changed = set_task_order(project.id, sequence, agent=_get_agent(agent))
+    except ValueError as exc:
+        raise click.ClickException(str(exc))
+    console.print(f"Order set ({len(sequence)} step(s); {changed} task(s) changed).")
+
+
+@order.command(name="clear")
+@click.option("--agent", default=None, help="Agent or user performing this action")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
+def order_clear(agent: Optional[str], yes: bool):
+    """Clear the recommended completion order."""
+    project = _require_project()
+    if not yes and not click.confirm("Clear the current task ordering?"):
+        return
+    cleared = clear_task_order(project.id, agent=_get_agent(agent))
+    console.print(f"Cleared ordering for {cleared} task(s).")
+
+
+@order.command(name="show")
+def order_show():
+    """Show the current recommended completion order."""
+    project = _require_project()
+    sequence = get_task_order(project.id)
+    if not sequence:
+        console.print("No order set.")
+        return
+    for i, step in enumerate(sequence, start=1):
+        ids = ", ".join(f"#{tid}" for tid in step)
+        console.print(f"Step {i}: {ids}")
 
 
 # Note command

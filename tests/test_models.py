@@ -37,6 +37,9 @@ def test_task_to_dict_and_from_row_roundtrip():
         "created_at": now.isoformat(),
         "updated_at": now.isoformat(),
         "completed_at": None,
+        "order_number": None,
+        "order_set_at": None,
+        "order_set_by": None,
     }
     task = Task.from_row(row)
     assert task.status == Status.IN_PROGRESS
