@@ -6,7 +6,7 @@ from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
-from .models import CodeReview, HistoryEntry, Note, Priority, Project, Status, Task
+from .models import CodeReview, HistoryEntry, Lift, Note, Priority, Project, Status, Task
 from .utils import TIMESTAMP_FORMAT, format_ts
 
 console = Console()
@@ -17,6 +17,13 @@ PRIORITY_LABELS = {
     Priority.LOW: "low",
     Priority.MEDIUM: "med",
     Priority.HIGH: "high",
+}
+
+LIFT_LABELS = {
+    Lift.UNSET: "-",
+    Lift.SMALL: "small",
+    Lift.MEDIUM: "med",
+    Lift.LARGE: "large",
 }
 
 STATUS_COLORS = {
@@ -46,6 +53,17 @@ def priority_badge(priority: Priority) -> Text:
     return Text(label, style=color)
 
 
+def lift_badge(lift: Lift) -> Text:
+    """Colored label for task lift estimate."""
+    label = LIFT_LABELS.get(lift, "-")
+    color = {
+        Lift.LARGE: "red",
+        Lift.MEDIUM: "yellow",
+        Lift.SMALL: "green",
+    }.get(lift, "white")
+    return Text(label, style=color)
+
+
 def print_projects(projects: List[Project]):
     """Render project list table."""
     table = Table(title="Projects")
@@ -72,6 +90,7 @@ def print_tasks(
     table.add_column("ID", justify="right")
     table.add_column("Status")
     table.add_column("Priority")
+    table.add_column("Lift")
     table.add_column("Group")
     table.add_column("Title")
     table.add_column("Updated")
@@ -81,6 +100,7 @@ def print_tasks(
             str(t.id),
             status_badge(t.status),
             priority_badge(t.priority),
+            lift_badge(t.lift),
             t.group_id or "-",
             f"{badge}{t.title}",
             format_ts(t.updated_at),
@@ -103,6 +123,7 @@ def _print_tasks_grouped(tasks: List[Task], blocked_ids: Optional[set] = None):
         table.add_column("ID", justify="right")
         table.add_column("Status")
         table.add_column("Priority")
+        table.add_column("Lift")
         table.add_column("Title")
         table.add_column("Updated")
         for t in group_tasks:
@@ -111,6 +132,7 @@ def _print_tasks_grouped(tasks: List[Task], blocked_ids: Optional[set] = None):
                 str(t.id),
                 status_badge(t.status),
                 priority_badge(t.priority),
+                lift_badge(t.lift),
                 f"{badge}{t.title}",
                 format_ts(t.updated_at),
             )
@@ -132,7 +154,7 @@ def print_task_detail(task: Task, relations: Optional[list] = None):
     console.print(f"[bold]Task {task.id}[/bold]: {task.title}")
     group_str = f"  Group: {task.group_id}" if task.group_id else ""
     console.print(
-        f"Status: {status_badge(task.status)}  Priority: {priority_badge(task.priority)}{group_str}"
+        f"Status: {status_badge(task.status)}  Priority: {priority_badge(task.priority)}  Lift: {lift_badge(task.lift)}{group_str}"
     )
     if task.description:
         console.print(task.description)
@@ -158,7 +180,7 @@ def print_focus(task: Optional[Task]):
         return
     console.print("[bold green]Focus[/bold green]:")
     console.print(
-        f"{status_badge(task.status)} {priority_badge(task.priority)} {task.title} (#{task.id})"
+        f"{status_badge(task.status)} {priority_badge(task.priority)} {lift_badge(task.lift)} {task.title} (#{task.id})"
     )
     if task.description:
         console.print(task.description)
@@ -202,7 +224,8 @@ def format_reviews(reviews: List[CodeReview]) -> None:
     for cr in reviews:
         ts = cr.created_at.strftime(TIMESTAMP_FORMAT)
         reviewer_str = f"  Reviewer: {cr.reviewer}" if cr.reviewer else ""
-        console.print(f"[bold]CR-{cr.cr_num}[/bold]  {ts}{reviewer_str}")
+        model_str = f"  Model: {cr.model}" if cr.model else ""
+        console.print(f"[bold]CR-{cr.cr_num}[/bold]  ({cr.kind})  {ts}{reviewer_str}{model_str}")
         console.print()
         if cr.recommendations:
             console.print("  [underline]Recommendations[/underline]")
@@ -281,9 +304,10 @@ def export_tasks_markdown(
             continue
         for t in by_status[status]:
             pr = ["", "(low)", "(medium)", "(high)"][int(t.priority)]
+            lf = ["", " {small}", " {med}", " {large}"][int(t.lift)]
             grp = f" [{t.group_id}]" if t.group_id else ""
             lines.append(
-                f"- [ {'x' if status == Status.DONE else ' '} ] {t.title} {pr}{grp}\n  {t.description or ''}"
+                f"- [ {'x' if status == Status.DONE else ' '} ] {t.title} {pr}{lf}{grp}\n  {t.description or ''}"
             )
             if include_notes:
                 notes = get_notes(t.id)

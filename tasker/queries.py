@@ -7,7 +7,7 @@ import sqlite3
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from .database import get_db
-from .models import INVERSE_LABELS, CodeReview, HistoryEntry, Note, Priority, Project, RelationType, Status, Task, TaskRelation
+from .models import INVERSE_LABELS, CodeReview, HistoryEntry, Lift, Note, Priority, Project, RelationType, Status, Task, TaskRelation
 from .utils import days_ago, now_iso
 
 ORDER_STEP = 1000
@@ -106,12 +106,13 @@ def create_task(
     description: Optional[str] = None,
     acceptance_criteria: Optional[Sequence[str]] = None,
     priority: Priority = Priority.NONE,
+    lift: Lift = Lift.UNSET,
     status: Status = Status.TODO,
     order_index: Optional[int] = None,
     group_id: Optional[str] = None,
     plan: Optional[str] = None,
 ) -> Task:
-    """Insert a task with optional status/priority, ordering, and group."""
+    """Insert a task with optional status/priority/lift, ordering, and group."""
     with get_db().transaction() as conn:
         idx = (
             order_index
@@ -129,11 +130,12 @@ def create_task(
                 plan,
                 status,
                 priority,
+                lift,
                 order_index,
                 group_id,
                 completed_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 project_id,
@@ -143,6 +145,7 @@ def create_task(
                 plan,
                 status.value,
                 int(priority),
+                int(lift),
                 idx,
                 group_id,
                 completed_at,
@@ -162,6 +165,7 @@ def list_tasks(
     project_id: int,
     status: Optional[Sequence[Status]] = None,
     priority: Optional[Priority] = None,
+    lift: Optional[Lift] = None,
     include_done: bool = True,
     group_id: Optional[str] = None,
 ) -> List[Task]:
@@ -181,6 +185,10 @@ def list_tasks(
         conditions.append("priority = ?")
         params.append(int(priority))
 
+    if lift is not None:
+        conditions.append("lift = ?")
+        params.append(int(lift))
+
     if group_id is not None:
         conditions.append("group_id = ?")
         params.append(group_id)
@@ -199,6 +207,7 @@ def update_task(
     description: Optional[str] = None,
     acceptance_criteria: Optional[Sequence[str]] = None,
     priority: Optional[Priority] = None,
+    lift: Optional[Lift] = None,
     status: Optional[Status] = None,
     group_id: Optional[str] = None,
     clear_group: bool = False,
@@ -228,6 +237,9 @@ def update_task(
     if priority is not None:
         sets.append("priority = ?")
         params.append(int(priority))
+    if lift is not None:
+        sets.append("lift = ?")
+        params.append(int(lift))
     if status is not None:
         sets.append("status = ?")
         params.append(status.value)
@@ -274,6 +286,8 @@ def update_task(
                 record_history(conn, task_id, agent, "status", old.get("status"), status.value)
             if priority is not None and old.get("priority") != int(priority):
                 record_history(conn, task_id, agent, "priority", str(old.get("priority")), str(int(priority)))
+            if lift is not None and old.get("lift") != int(lift):
+                record_history(conn, task_id, agent, "lift", str(old.get("lift")), str(int(lift)))
             if plan is not None:
                 new_plan = plan or None
                 if old.get("plan") != new_plan:
@@ -578,7 +592,9 @@ def task_has_reviews(task_id: int) -> bool:
     return row is not None
 
 
-def create_review_stub(task_id: int) -> CodeReview:
+def create_review_stub(
+    task_id: int, kind: str = "standard", model: Optional[str] = None
+) -> CodeReview:
     """Create a new CR stub with auto-incremented cr_num (within a transaction)."""
     with get_db().transaction() as conn:
         row = conn.execute(
@@ -587,8 +603,8 @@ def create_review_stub(task_id: int) -> CodeReview:
         ).fetchone()
         cr_num = row["next_num"]
         cur = conn.execute(
-            "INSERT INTO task_reviews(task_id, cr_num) VALUES (?, ?)",
-            (task_id, cr_num),
+            "INSERT INTO task_reviews(task_id, cr_num, kind, model) VALUES (?, ?, ?, ?)",
+            (task_id, cr_num, kind, model),
         )
         row = conn.execute(
             "SELECT * FROM task_reviews WHERE id = ?", (cur.lastrowid,)
@@ -596,13 +612,32 @@ def create_review_stub(task_id: int) -> CodeReview:
         return CodeReview.from_row(row)
 
 
-def get_reviews(task_id: int) -> List[CodeReview]:
-    """Return all code reviews for a task ordered by cr_num."""
+def get_reviews(
+    task_id: int,
+    kind: Optional[str] = None,
+    model: Optional[str] = None,
+    model_lt: Optional[str] = None,
+) -> List[CodeReview]:
+    """Return code reviews for a task ordered by cr_num, optionally filtered.
+
+    kind: exact match. model: exact match. model_lt: lexicographic `model < value`
+    (surfaces reviews done by an older model than the current one). model_lt
+    excludes rows with NULL model.
+    """
+    sql = "SELECT * FROM task_reviews WHERE task_id = ?"
+    params: List = [task_id]
+    if kind is not None:
+        sql += " AND kind = ?"
+        params.append(kind)
+    if model is not None:
+        sql += " AND model = ?"
+        params.append(model)
+    if model_lt is not None:
+        sql += " AND model IS NOT NULL AND model < ?"
+        params.append(model_lt)
+    sql += " ORDER BY cr_num ASC"
     conn = get_db().connect()
-    rows = conn.execute(
-        "SELECT * FROM task_reviews WHERE task_id = ? ORDER BY cr_num ASC",
-        (task_id,),
-    ).fetchall()
+    rows = conn.execute(sql, params).fetchall()
     return [CodeReview.from_row(r) for r in rows]
 
 
@@ -618,7 +653,7 @@ def get_review(task_id: int, cr_num: int) -> Optional[CodeReview]:
 
 def update_review(task_id: int, cr_num: int, **fields) -> Optional[CodeReview]:
     """Update one or more fields of a code review. Returns updated CR or None."""
-    allowed = {"reviewer", "recommendations", "devils_advocate", "false_positives"}
+    allowed = {"reviewer", "recommendations", "devils_advocate", "false_positives", "kind", "model"}
     sets = []
     params: List = []
     for key, value in fields.items():

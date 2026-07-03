@@ -89,6 +89,23 @@ class Priority(IntEnum):
             raise ValueError(f"Invalid priority: {value}") from exc
 
 
+class Lift(IntEnum):
+    """Scope/lift estimate ordered from unset to large."""
+
+    UNSET = 0
+    SMALL = 1
+    MEDIUM = 2
+    LARGE = 3
+
+    @classmethod
+    def from_value(cls, value: int) -> "Lift":
+        """Create a Lift from its integer value, raising if invalid."""
+        try:
+            return cls(int(value))
+        except Exception as exc:  # noqa: BLE001
+            raise ValueError(f"Invalid lift: {value}") from exc
+
+
 @dataclass
 class Project:
     """Project row model."""
@@ -141,6 +158,7 @@ class Task:
     created_at: datetime
     updated_at: datetime
     completed_at: Optional[datetime]
+    lift: Lift = Lift.UNSET
     order_number: Optional[int] = None
     order_set_at: Optional[datetime] = None
     order_set_by: Optional[str] = None
@@ -167,6 +185,7 @@ class Task:
             plan=row["plan"],
             status=Status.from_value(row["status"]),
             priority=Priority.from_value(row["priority"]),
+            lift=Lift.from_value(row["lift"]),
             order_index=row["order_index"],
             group_id=row["group_id"],
             created_at=datetime.fromisoformat(row["created_at"]),
@@ -190,6 +209,7 @@ class Task:
             "plan": self.plan,
             "status": self.status.value,
             "priority": int(self.priority),
+            "lift": int(self.lift),
             "order_index": self.order_index,
             "group_id": self.group_id,
             "created_at": self.created_at.isoformat(),
@@ -243,6 +263,8 @@ class CodeReview:
     recommendations: Optional[str]
     devils_advocate: Optional[str]
     false_positives: Optional[str]
+    kind: str
+    model: Optional[str]
     created_at: datetime
     updated_at: datetime
 
@@ -256,6 +278,8 @@ class CodeReview:
             recommendations=row["recommendations"],
             devils_advocate=row["devils_advocate"],
             false_positives=row["false_positives"],
+            kind=row["kind"],
+            model=row["model"],
             created_at=datetime.fromisoformat(row["created_at"]),
             updated_at=datetime.fromisoformat(row["updated_at"]),
         )
@@ -267,6 +291,8 @@ class CodeReview:
             "recommendations": self.recommendations,
             "devils_advocate": self.devils_advocate,
             "false_positives": self.false_positives,
+            "kind": self.kind,
+            "model": self.model,
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),
         }

@@ -23,7 +23,7 @@ from .formatter import (
     print_tasks,
 )
 from .models import RelationType
-from .models import Priority, Status
+from .models import Lift, Priority, Status
 from .queries import (
     add_note,
     add_relation,
@@ -63,6 +63,7 @@ from .utils import resolve_project_path
 
 
 PRIORITY_CHOICES = ["none", "low", "med", "medium", "high"]
+LIFT_CHOICES = ["unset", "small", "med", "medium", "large"]
 STATUS_CHOICES = [s.value for s in Status]
 
 
@@ -85,6 +86,21 @@ def _parse_priority(priority: Optional[str]) -> Optional[Priority]:
     if priority not in mapping:
         raise click.BadParameter("Priority must be one of: none, low, medium, high")
     return mapping[priority]
+
+
+def _parse_lift(lift: Optional[str]) -> Optional[Lift]:
+    if lift is None:
+        return None
+    mapping = {
+        "unset": Lift.UNSET,
+        "small": Lift.SMALL,
+        "med": Lift.MEDIUM,
+        "medium": Lift.MEDIUM,
+        "large": Lift.LARGE,
+    }
+    if lift not in mapping:
+        raise click.BadParameter("Lift must be one of: unset, small, medium, large")
+    return mapping[lift]
 
 
 def _parse_status(status: Optional[str]) -> Optional[Status]:
@@ -212,6 +228,7 @@ def projects():
     help="JSON array of acceptance criteria strings",
 )
 @click.option("--priority", "-p", type=click.Choice(PRIORITY_CHOICES), default="none")
+@click.option("--lift", type=click.Choice(LIFT_CHOICES), default="unset")
 @click.option(
     "--status", "-s", type=click.Choice(STATUS_CHOICES), default=Status.TODO.value
 )
@@ -223,6 +240,7 @@ def add(
     acceptance_criteria: Tuple[str, ...],
     acceptance_criteria_json: Optional[str],
     priority: str,
+    lift: str,
     status: str,
     group_id: Optional[str],
     plan: Optional[str],
@@ -242,6 +260,7 @@ def add(
         description=description,
         acceptance_criteria=acceptance_criteria_value,
         priority=_parse_priority(priority) or Priority.NONE,
+        lift=_parse_lift(lift) or Lift.UNSET,
         status=_parse_status(status) or Status.TODO,
         group_id=group_id,
         plan=plan,
@@ -256,6 +275,7 @@ def add(
 @click.option(
     "--priority", "-p", type=click.Choice(PRIORITY_CHOICES), help="Filter by priority"
 )
+@click.option("--lift", type=click.Choice(LIFT_CHOICES), help="Filter by lift")
 @click.option("--all", "-a", "show_all", is_flag=True, help="Include completed tasks")
 @click.option("--group", "-g", "group_id", help="Filter by group ID")
 @click.option(
@@ -265,6 +285,7 @@ def add(
 def list_cmd(
     status: Optional[str],
     priority: Optional[str],
+    lift: Optional[str],
     show_all: bool,
     group_id: Optional[str],
     group_by: bool,
@@ -278,10 +299,12 @@ def list_cmd(
     status_filter = [status_val] if status_val else None
 
     priority_filter = _parse_priority(priority) if priority else None
+    lift_filter = _parse_lift(lift) if lift else None
     tasks = list_tasks(
         project.id,
         status=status_filter,
         priority=priority_filter,
+        lift=lift_filter,
         include_done=show_all,
         group_id=group_id,
     )
@@ -326,6 +349,7 @@ def show(task_id: int, show_notes: bool, show_history: bool):
     help="JSON array of acceptance criteria strings",
 )
 @click.option("--priority", "-p", type=click.Choice(PRIORITY_CHOICES))
+@click.option("--lift", type=click.Choice(LIFT_CHOICES))
 @click.option("--status", "-s", type=click.Choice(STATUS_CHOICES))
 @click.option("--group", "-g", "group_id", help="Group ID (use '' to clear)")
 @click.option("--plan", help="Implementation plan (use '-' to read from stdin)")
@@ -337,6 +361,7 @@ def update(
     acceptance_criteria: Tuple[str, ...],
     acceptance_criteria_json: Optional[str],
     priority: Optional[str],
+    lift: Optional[str],
     status: Optional[str],
     group_id: Optional[str],
     plan: Optional[str],
@@ -356,18 +381,21 @@ def update(
             clear_group = True
         else:
             new_group_id = group_id
-    status_agent = _get_agent(agent) if status else None
+    # Agent attribution: status changes always record history; other field
+    # changes record history when --agent is explicitly provided.
+    history_agent = _get_agent(agent) if (status or agent) else None
     updated = update_task(
         task_id,
         title=title,
         description=description,
         acceptance_criteria=acceptance_criteria_value,
         priority=_parse_priority(priority),
+        lift=_parse_lift(lift),
         status=_parse_status(status),
         group_id=new_group_id,
         clear_group=clear_group,
         plan=plan,
-        agent=status_agent,
+        agent=history_agent,
     )
     if updated:
         console.print(f"Updated task #{updated.id}")
@@ -640,16 +668,21 @@ def cr():
 
 @cr.command(name="list")
 @click.argument("task_id", type=click.IntRange(min=1))
-def cr_list(task_id: int):
+@click.option("--kind", type=click.Choice(["standard", "adversarial"]), help="Filter by review kind")
+@click.option("--model", help="Filter by exact model")
+@click.option("--model-lt", "model_lt", help="Filter to reviews done by a model lexicographically older than this")
+def cr_list(task_id: int, kind: Optional[str], model: Optional[str], model_lt: Optional[str]):
     """List all code reviews for a task."""
     _require_task(task_id)
-    reviews = get_reviews(task_id)
+    reviews = get_reviews(task_id, kind=kind, model=model, model_lt=model_lt)
     if not reviews:
         console.print("No code reviews found.")
         return
     from rich.table import Table
     table = Table(title=f"Code Reviews — Task #{task_id}")
     table.add_column("CR#", justify="right")
+    table.add_column("Kind")
+    table.add_column("Model")
     table.add_column("Reviewer")
     table.add_column("Created")
     table.add_column("Fields set", justify="right")
@@ -657,6 +690,8 @@ def cr_list(task_id: int):
         filled = sum(1 for f in [cr_obj.reviewer, cr_obj.recommendations, cr_obj.devils_advocate, cr_obj.false_positives] if f)
         table.add_row(
             str(cr_obj.cr_num),
+            cr_obj.kind,
+            cr_obj.model or "-",
             cr_obj.reviewer or "-",
             cr_obj.created_at.strftime("%Y-%m-%d %H:%M"),
             str(filled),
@@ -679,11 +714,13 @@ def cr_show(task_id: int, cr_num: int):
 
 @cr.command(name="add")
 @click.argument("task_id", type=click.IntRange(min=1))
-def cr_add(task_id: int):
+@click.option("--kind", type=click.Choice(["standard", "adversarial"]), default="standard", show_default=True, help="Review kind")
+@click.option("--model", help="Claude model that performed the review (e.g. claude-opus-4-7)")
+def cr_add(task_id: int, kind: str, model: Optional[str]):
     """Create a new code review stub for a task."""
     _require_task(task_id)
-    cr_obj = create_review_stub(task_id)
-    console.print(f"Created CR-{cr_obj.cr_num} for task #{task_id}.")
+    cr_obj = create_review_stub(task_id, kind=kind, model=model)
+    console.print(f"Created CR-{cr_obj.cr_num} ({cr_obj.kind}) for task #{task_id}.")
     console.print(f"Use 'tasker cr update {task_id} {cr_obj.cr_num}' to fill in details.")
 
 
@@ -694,7 +731,9 @@ def cr_add(task_id: int):
 @click.option("--recommendations", "-R", help="Core findings and suggested changes (or - for stdin)")
 @click.option("--devils-advocate", "-d", "devils_advocate", help="Reviewer's self-critique (or - for stdin)")
 @click.option("--false-positives", "-f", "false_positives", help="Issues raised but ruled out (or - for stdin)")
-def cr_update(task_id: int, cr_num: int, reviewer: Optional[str], recommendations: Optional[str], devils_advocate: Optional[str], false_positives: Optional[str]):
+@click.option("--kind", type=click.Choice(["standard", "adversarial"]), help="Review kind")
+@click.option("--model", help="Claude model that performed the review (e.g. claude-opus-4-7)")
+def cr_update(task_id: int, cr_num: int, reviewer: Optional[str], recommendations: Optional[str], devils_advocate: Optional[str], false_positives: Optional[str], kind: Optional[str], model: Optional[str]):
     """Update fields of a code review."""
     _require_task(task_id)
     cr_obj = get_review(task_id, cr_num)
@@ -707,7 +746,7 @@ def cr_update(task_id: int, cr_num: int, reviewer: Optional[str], recommendation
         devils_advocate = sys.stdin.read()
     if false_positives == "-":
         false_positives = sys.stdin.read()
-    updated = update_review(task_id, cr_num, reviewer=reviewer, recommendations=recommendations, devils_advocate=devils_advocate, false_positives=false_positives)
+    updated = update_review(task_id, cr_num, reviewer=reviewer, recommendations=recommendations, devils_advocate=devils_advocate, false_positives=false_positives, kind=kind, model=model)
     if updated:
         console.print(f"Updated CR-{cr_num} for task #{task_id}.")
 

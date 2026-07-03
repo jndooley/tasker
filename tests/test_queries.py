@@ -472,6 +472,61 @@ def test_reviews_cascade_delete():
     assert row["c"] == 0
 
 
+def test_review_stub_defaults_kind_standard():
+    project = queries.create_project("/tmp/revK1", "Rev K1")
+    task = queries.create_task(project.id, "Task")
+
+    cr = queries.create_review_stub(task.id)
+    assert cr.kind == "standard"
+    assert cr.model is None
+
+
+def test_review_stub_with_kind_and_model_roundtrips():
+    project = queries.create_project("/tmp/revK2", "Rev K2")
+    task = queries.create_task(project.id, "Task")
+
+    cr = queries.create_review_stub(task.id, kind="adversarial", model="claude-opus-4-7")
+    assert cr.kind == "adversarial"
+    assert cr.model == "claude-opus-4-7"
+
+    fetched = queries.get_review(task.id, cr.cr_num)
+    assert fetched.kind == "adversarial"
+    assert fetched.model == "claude-opus-4-7"
+
+
+def test_update_review_kind_and_model():
+    project = queries.create_project("/tmp/revK3", "Rev K3")
+    task = queries.create_task(project.id, "Task")
+    queries.create_review_stub(task.id)
+
+    updated = queries.update_review(task.id, 1, kind="adversarial", model="claude-opus-4-8")
+    assert updated.kind == "adversarial"
+    assert updated.model == "claude-opus-4-8"
+
+
+def test_get_reviews_filters_by_kind():
+    project = queries.create_project("/tmp/revK4", "Rev K4")
+    task = queries.create_task(project.id, "Task")
+    queries.create_review_stub(task.id, kind="standard")
+    queries.create_review_stub(task.id, kind="adversarial", model="claude-opus-4-7")
+
+    adversarial = queries.get_reviews(task.id, kind="adversarial")
+    assert len(adversarial) == 1
+    assert adversarial[0].kind == "adversarial"
+
+
+def test_get_reviews_model_lt_surfaces_older_only():
+    project = queries.create_project("/tmp/revK5", "Rev K5")
+    task = queries.create_task(project.id, "Task")
+    queries.create_review_stub(task.id, kind="adversarial", model="claude-opus-4-6")
+    queries.create_review_stub(task.id, kind="adversarial", model="claude-opus-4-7")
+    queries.create_review_stub(task.id, kind="standard")  # NULL model
+
+    older = queries.get_reviews(task.id, model_lt="claude-opus-4-7")
+    models = {cr.model for cr in older}
+    assert models == {"claude-opus-4-6"}  # 4-7 excluded (not <), NULL excluded
+
+
 def test_check_constraints_enforced():
     project = queries.create_project("/tmp/projectG", "Project G")
     with get_db().transaction() as conn:

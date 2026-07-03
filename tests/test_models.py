@@ -1,7 +1,7 @@
 from datetime import datetime
 import json
 
-from tasker.models import Priority, Project, Status, Task
+from tasker.models import Lift, Priority, Project, Status, Task
 
 
 def test_project_to_dict_and_from_row_roundtrip():
@@ -32,6 +32,7 @@ def test_task_to_dict_and_from_row_roundtrip():
         "plan": None,
         "status": "in-progress",
         "priority": 2,
+        "lift": 1,
         "order_index": 1000,
         "group_id": "backend",
         "created_at": now.isoformat(),
@@ -44,9 +45,11 @@ def test_task_to_dict_and_from_row_roundtrip():
     task = Task.from_row(row)
     assert task.status == Status.IN_PROGRESS
     assert task.priority == Priority.MEDIUM
+    assert task.lift == Lift.SMALL
     assert task.group_id == "backend"
     data = task.to_dict()
     assert data["status"] == "in-progress"
     assert data["priority"] == 2
+    assert data["lift"] == 1
     assert data["acceptance_criteria"] == ["criterion one", "criterion two"]
     assert data["group_id"] == "backend"

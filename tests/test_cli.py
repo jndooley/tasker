@@ -211,6 +211,55 @@ def test_cli_cr_workflow(tmp_path, monkeypatch):
     assert "CR-2" not in list_res2.output
 
 
+def test_cli_cr_adversarial_kind_model(tmp_path, monkeypatch):
+    db_path = tmp_path / "cli.db"
+    monkeypatch.setenv("TASKER_DB_PATH", str(db_path))
+
+    runner = CliRunner()
+    runner.invoke(cli.cli, ["init", str(tmp_path)])
+    runner.invoke(cli.cli, ["add", "A task"])
+
+    # cr add with kind + model
+    add_res = runner.invoke(cli.cli, ["cr", "add", "1", "--kind", "adversarial", "--model", "claude-opus-4-7"])
+    assert add_res.exit_code == 0
+    assert "adversarial" in add_res.output
+
+    # show renders kind + model
+    show_res = runner.invoke(cli.cli, ["cr", "show", "1", "1"])
+    assert show_res.exit_code == 0
+    assert "adversarial" in show_res.output
+    assert "claude-opus-4-7" in show_res.output
+
+    # list --kind filters
+    runner.invoke(cli.cli, ["cr", "add", "1"])  # CR-2 standard
+    kind_res = runner.invoke(cli.cli, ["cr", "list", "1", "--kind", "adversarial"])
+    assert "claude-opus-4-7" in kind_res.output
+
+    # list --model-lt surfaces only older
+    lt_res = runner.invoke(cli.cli, ["cr", "list", "1", "--model-lt", "claude-opus-4-8"])
+    assert "claude-opus-4-7" in lt_res.output
+    lt_none = runner.invoke(cli.cli, ["cr", "list", "1", "--model-lt", "claude-opus-4-6"])
+    assert "No code reviews found" in lt_none.output
+
+
+def test_cli_cr_backward_compat_no_flags(tmp_path, monkeypatch):
+    db_path = tmp_path / "cli.db"
+    monkeypatch.setenv("TASKER_DB_PATH", str(db_path))
+
+    runner = CliRunner()
+    runner.invoke(cli.cli, ["init", str(tmp_path)])
+    runner.invoke(cli.cli, ["add", "A task"])
+
+    # add/update/show with no new flags still work; defaults to standard
+    add_res = runner.invoke(cli.cli, ["cr", "add", "1"])
+    assert add_res.exit_code == 0
+    upd_res = runner.invoke(cli.cli, ["cr", "update", "1", "1", "--reviewer", "jason"])
+    assert upd_res.exit_code == 0
+    show_res = runner.invoke(cli.cli, ["cr", "show", "1", "1"])
+    assert show_res.exit_code == 0
+    assert "standard" in show_res.output
+
+
 def test_cli_export_include_notes(tmp_path, monkeypatch):
     db_path = tmp_path / "cli.db"
     monkeypatch.setenv("TASKER_DB_PATH", str(db_path))

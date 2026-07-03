@@ -4,7 +4,7 @@ Tasker is a lightweight command-line task tracker built for AI agents. It keeps 
 
 ## Features
 
-- Task CRUD with status, priority, grouping, and implementation plans
+- Task CRUD with status, priority, lift (scope estimate), grouping, and implementation plans
 - Acceptance criteria per task for richer context
 - Task relations: `blocked-by`, `caused-by`, `related-to`
 - Notes log: append-only timestamped commentary per task
@@ -45,6 +45,7 @@ tasker list --status in-progress
 tasker list --group auth --group-by
 tasker show TASK_ID
 tasker update TASK_ID --title "New title" --priority medium
+tasker update TASK_ID --lift small        # scope estimate: small | medium | large
 tasker delete TASK_ID
 tasker reorder TASK_ID POSITION
 ```

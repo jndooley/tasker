@@ -11,7 +11,7 @@ from .utils import resolve_db_path
 class Database:
     """SQLite database singleton wrapper with schema migrations and transactions."""
 
-    SCHEMA_VERSION = 10
+    SCHEMA_VERSION = 12
 
     def __init__(self, db_path: Optional[Path] = None):
         self._db_path = db_path or resolve_db_path()
@@ -69,6 +69,7 @@ class Database:
             acceptance_criteria TEXT,
             status TEXT NOT NULL DEFAULT 'todo' CHECK (status IN ('todo','in-progress','blocked','review','qa','done')),
             priority INTEGER DEFAULT 0 CHECK (priority BETWEEN 0 AND 3),
+            lift INTEGER DEFAULT 0 CHECK (lift BETWEEN 0 AND 3),
             order_index INTEGER DEFAULT 0,
             group_id TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -283,6 +284,32 @@ class Database:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_tasks_order_number ON tasks(order_number)"
             )
+
+        if current < 11:
+            columns = {
+                row["name"]
+                for row in conn.execute("PRAGMA table_info(task_reviews)").fetchall()
+            }
+            if "kind" not in columns:
+                conn.execute(
+                    "ALTER TABLE task_reviews ADD COLUMN kind TEXT NOT NULL DEFAULT 'standard'"
+                )
+            if "model" not in columns:
+                conn.execute("ALTER TABLE task_reviews ADD COLUMN model TEXT")
+
+        if current < 12:
+            # Plain guarded ALTER, same crash-safe family as migrations 7/10/11.
+            # A copy-table rebuild here would risk data loss in the
+            # DROP-to-RENAME crash window and reset the AUTOINCREMENT
+            # sequence, enabling task-id reuse after deletes.
+            columns = {
+                row["name"]
+                for row in conn.execute("PRAGMA table_info(tasks)").fetchall()
+            }
+            if "lift" not in columns:
+                conn.execute(
+                    "ALTER TABLE tasks ADD COLUMN lift INTEGER DEFAULT 0 CHECK (lift BETWEEN 0 AND 3)"
+                )
 
         if current < self.SCHEMA_VERSION:
             self._set_version(self.SCHEMA_VERSION)
